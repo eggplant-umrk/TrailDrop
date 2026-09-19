@@ -1,0 +1,50 @@
+# ==== Python (backend) ====
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+ENV/
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+instance/
+.env
+.env.*
+!.env.example
+
+# ==== Node / Frontend ====
+node_modules/
+dist/
+dist-ssr/
+build/
+.vite/
+.turbo/
+*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ==== Editors / OS ====
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ==== Supabase / Infra ====
+.supabase/
+*.sqlite3
+
+# ==== Logs ====
+*.log
+logs/
