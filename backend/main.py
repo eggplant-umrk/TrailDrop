@@ -1,7 +1,8 @@
 import os
+import secrets
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import Client, create_client
 
@@ -31,6 +32,24 @@ def get_supabase() -> Client:
     return create_client(url, key)
 
 
+def require_staff_token(token: str | None) -> None:
+    expected_token = os.getenv("STAFF_API_TOKEN")
+    if not expected_token:
+        raise HTTPException(status_code=503, detail="Staff authentication is not configured")
+    if not token or not secrets.compare_digest(token, expected_token):
+        raise HTTPException(status_code=401, detail="Invalid staff token")
+
+
+def reservation_error(exc: Exception) -> HTTPException:
+    code = getattr(exc, "code", "")
+    message = getattr(exc, "message", str(exc))
+    if code == "P0002" or "ITEM_NOT_FOUND" in message:
+        return HTTPException(status_code=404, detail="Item not found")
+    if code == "P0001" or "OUT_OF_STOCK" in message:
+        return HTTPException(status_code=409, detail="Item is out of stock")
+    return HTTPException(status_code=502, detail="Failed to create reservation")
+
+
 @app.get("/items", response_model=list[Item])
 def list_items():
     try:
@@ -47,8 +66,13 @@ def create_reservation(reservation: ReservationCreate):
     try:
         response = (
             get_supabase()
-            .table("reservations")
-            .insert(reservation.model_dump(mode="json"))
+            .rpc(
+                "create_reservation_with_stock",
+                {
+                    "p_item_id": str(reservation.item_id),
+                    "p_user_name": reservation.user_name,
+                },
+            )
             .execute()
         )
         if not response.data:
@@ -57,7 +81,7 @@ def create_reservation(reservation: ReservationCreate):
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=502, detail="Failed to create reservation") from exc
+        raise reservation_error(exc) from exc
 
 
 @app.get("/reservations/{reservation_id}", response_model=ReservationResponse)
@@ -81,18 +105,35 @@ def get_reservation(reservation_id: str):
 
 
 @app.post("/qr/verify", response_model=ReservationResponse)
-def verify_qr(request: QRVerifyRequest):
+def verify_qr(
+    request: QRVerifyRequest,
+    x_staff_token: str | None = Header(default=None, alias="X-Staff-Token"),
+):
+    require_staff_token(x_staff_token)
     try:
+        supabase = get_supabase()
         response = (
-            get_supabase()
+            supabase
             .table("reservations")
             .update({"status": "completed"})
             .eq("qr_token", str(request.qr_token))
+            .eq("status", "pending")
             .execute()
         )
-        if not response.data:
+        if response.data:
+            return response.data[0]
+
+        existing = (
+            supabase
+            .table("reservations")
+            .select("status")
+            .eq("qr_token", str(request.qr_token))
+            .limit(1)
+            .execute()
+        )
+        if not existing.data:
             raise HTTPException(status_code=404, detail="QR token not found")
-        return response.data[0]
+        raise HTTPException(status_code=409, detail="Reservation is already completed")
     except HTTPException:
         raise
     except Exception as exc:
