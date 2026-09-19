@@ -2,26 +2,116 @@
 
 create extension if not exists pgcrypto;
 
-create table if not exists items (
+create table if not exists public.items (
     id uuid primary key default gen_random_uuid(),
     title varchar not null,
     type varchar not null check (type in ('pickup', 'experience')),
-    price integer not null,
-    stock integer not null,
+    price integer not null constraint items_price_nonnegative check (price >= 0),
+    stock integer not null constraint items_stock_nonnegative check (stock >= 0),
     location_name varchar not null,
     created_at timestamptz default now()
 );
 
-create table if not exists reservations (
+create table if not exists public.reservations (
     id uuid primary key default gen_random_uuid(),
-    item_id uuid not null references items(id),
+    item_id uuid not null references public.items(id),
     user_name varchar not null,
-    qr_token uuid unique default gen_random_uuid(),
-    status varchar default 'pending' check (status in ('pending', 'completed')),
+    qr_token uuid not null unique default gen_random_uuid(),
+    status varchar not null default 'pending' check (status in ('pending', 'completed')),
     reserved_at timestamptz default now()
 );
 
-insert into items (id, title, type, price, stock, location_name)
+-- Apply the tightened constraints when this script runs against an existing project.
+update public.reservations
+set qr_token = gen_random_uuid()
+where qr_token is null;
+
+update public.reservations
+set status = 'pending'
+where status is null;
+
+alter table public.reservations alter column qr_token set not null;
+alter table public.reservations alter column status set not null;
+
+do $$
+begin
+    if not exists (
+        select 1
+        from pg_constraint
+        where conname = 'items_price_nonnegative'
+          and conrelid = 'public.items'::regclass
+    ) then
+        alter table public.items
+            add constraint items_price_nonnegative check (price >= 0);
+    end if;
+
+    if not exists (
+        select 1
+        from pg_constraint
+        where conname = 'items_stock_nonnegative'
+          and conrelid = 'public.items'::regclass
+    ) then
+        alter table public.items
+            add constraint items_stock_nonnegative check (stock >= 0);
+    end if;
+end
+$$;
+
+alter table public.items enable row level security;
+alter table public.reservations enable row level security;
+
+drop policy if exists items_public_read on public.items;
+create policy items_public_read
+on public.items
+for select
+to anon, authenticated
+using (true);
+
+grant select on table public.items to anon, authenticated;
+revoke insert, update, delete on table public.items from anon, authenticated;
+revoke all on table public.reservations from anon, authenticated;
+grant select, update on table public.items to service_role;
+grant select, insert, update on table public.reservations to service_role;
+
+create or replace function public.create_reservation_with_stock(
+    p_item_id uuid,
+    p_user_name varchar
+)
+returns setof public.reservations
+language plpgsql
+security invoker
+set search_path = ''
+as $$
+declare
+    created_reservation public.reservations;
+begin
+    update public.items
+    set stock = stock - 1
+    where id = p_item_id
+      and stock > 0;
+
+    if not found then
+        if exists (select 1 from public.items where id = p_item_id) then
+            raise exception 'OUT_OF_STOCK' using errcode = 'P0001';
+        end if;
+        raise exception 'ITEM_NOT_FOUND' using errcode = 'P0002';
+    end if;
+
+    insert into public.reservations (item_id, user_name)
+    values (p_item_id, p_user_name)
+    returning * into created_reservation;
+
+    return next created_reservation;
+end;
+$$;
+
+revoke all on function public.create_reservation_with_stock(uuid, varchar) from public;
+revoke all on function public.create_reservation_with_stock(uuid, varchar)
+from anon, authenticated;
+grant execute on function public.create_reservation_with_stock(uuid, varchar)
+to service_role;
+
+insert into public.items (id, title, type, price, stock, location_name)
 values
     (
         '11111111-1111-4111-8111-111111111111',
