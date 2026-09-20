@@ -10,12 +10,18 @@ from models import Item, QRVerifyRequest, ReservationCreate, ReservationResponse
 
 load_dotenv()
 
+
+def get_allowed_origins() -> list[str]:
+    configured_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173")
+    return [origin.strip() for origin in configured_origins.split(",") if origin.strip()]
+
+
 app = FastAPI(title="TrailDrop API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=get_allowed_origins(),
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
