@@ -6,7 +6,14 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import Client, create_client
 
-from models import Item, QRVerifyRequest, ReservationCreate, ReservationResponse
+from models import (
+    Item,
+    QRVerifyRequest,
+    QRVerifyResponse,
+    ReservationCreate,
+    ReservationCreateResponse,
+    ReservationResponse,
+)
 
 load_dotenv()
 
@@ -67,7 +74,7 @@ def list_items():
         raise HTTPException(status_code=502, detail="Failed to fetch items") from exc
 
 
-@app.post("/reservations", response_model=ReservationResponse, status_code=201)
+@app.post("/reservations", response_model=ReservationCreateResponse, status_code=201)
 def create_reservation(reservation: ReservationCreate):
     try:
         response = (
@@ -116,7 +123,7 @@ def get_reservation(
         raise HTTPException(status_code=502, detail="Failed to fetch reservation") from exc
 
 
-@app.post("/qr/verify", response_model=ReservationResponse)
+@app.post("/qr/verify", response_model=QRVerifyResponse)
 def verify_qr(
     request: QRVerifyRequest,
     x_staff_token: str | None = Header(default=None, alias="X-Staff-Token"),

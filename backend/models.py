@@ -24,9 +24,16 @@ class ReservationResponse(BaseModel):
     item_id: UUID
     user_name: str
     qr_token: UUID
-    access_token: UUID
     status: str
     reserved_at: datetime | None = None
+
+
+class ReservationCreateResponse(ReservationResponse):
+    access_token: UUID
+
+
+class QRVerifyResponse(ReservationResponse):
+    pass
 
 
 class QRVerifyRequest(BaseModel):
