@@ -29,11 +29,11 @@ app.add_middleware(
 
 def get_supabase() -> Client:
     url = os.getenv("SUPABASE_URL")
-    key = os.getenv("SUPABASE_KEY")
+    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
     if not url or not key:
         raise HTTPException(
             status_code=503,
-            detail="SUPABASE_URL and SUPABASE_KEY must be configured",
+            detail="SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be configured",
         )
     return create_client(url, key)
 
@@ -91,13 +91,19 @@ def create_reservation(reservation: ReservationCreate):
 
 
 @app.get("/reservations/{reservation_id}", response_model=ReservationResponse)
-def get_reservation(reservation_id: str):
+def get_reservation(
+    reservation_id: str,
+    x_reservation_token: str | None = Header(default=None, alias="X-Reservation-Token"),
+):
+    if not x_reservation_token:
+        raise HTTPException(status_code=404, detail="Reservation not found")
     try:
         response = (
             get_supabase()
             .table("reservations")
             .select("*")
             .eq("id", reservation_id)
+            .eq("access_token", x_reservation_token)
             .limit(1)
             .execute()
         )

@@ -17,6 +17,7 @@ create table if not exists public.reservations (
     item_id uuid not null references public.items(id),
     user_name varchar not null,
     qr_token uuid not null unique default gen_random_uuid(),
+    access_token uuid not null unique default gen_random_uuid(),
     status varchar not null default 'pending' check (status in ('pending', 'completed')),
     reserved_at timestamptz default now()
 );

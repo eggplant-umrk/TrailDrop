@@ -17,4 +17,4 @@ supabase db reset
 
 既存のリモートプロジェクトへ適用する場合は、先に `supabase login` と `supabase link --project-ref <project-ref>` を実行し、その後 `supabase db push` を実行してください。
 
-SQL Editorを使う場合は `schema.sql` を使用します。`service_role` keyなどの秘密情報はこのディレクトリやフロントエンドに置かないでください。
+SQL Editorを使う場合は `schema.sql` を使用します。`SUPABASE_SERVICE_ROLE_KEY` や `STAFF_API_TOKEN` などの秘密情報はこのディレクトリやフロントエンドに置かず、バックエンドの `.env` だけに設定してください。
