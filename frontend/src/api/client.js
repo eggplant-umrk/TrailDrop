@@ -104,7 +104,10 @@ export async function getReservation(reservationId, reservationToken) {
         err.status = 404;
         throw err;
       }
-      if (reservationToken && res.access_token !== reservationToken) {
+      // Require a reservationToken and validate it against stored access_token.
+      // Previously the check skipped validation when reservationToken was missing,
+      // allowing anonymous access to demo reservations. Enforce presence and match.
+      if (!reservationToken || res.access_token !== reservationToken) {
         const err = new Error("Invalid reservation token");
         err.status = 401;
         throw err;
