@@ -58,11 +58,13 @@ export async function getItems() {
 
 export async function createReservation({ item_id, user_name }) {
   if (!BASE) {
+    // Demo mode: persist reservations in sessionStorage so they survive reloads
     const now = new Date().toISOString();
     const id = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `demo-${Date.now()}`;
     const qr = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `qr-${Date.now()}`;
     const access = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `access-${Date.now()}`;
-    return {
+
+    const reservation = {
       id,
       item_id,
       user_name,
@@ -71,6 +73,17 @@ export async function createReservation({ item_id, user_name }) {
       status: "pending",
       reserved_at: now,
     };
+
+    try {
+      const raw = sessionStorage.getItem("demo_reservations") || "{}";
+      const map = JSON.parse(raw);
+      map[id] = reservation;
+      sessionStorage.setItem("demo_reservations", JSON.stringify(map));
+    } catch (e) {
+      // ignore storage errors in demo mode
+    }
+
+    return reservation;
   }
   return await request(`/reservations`, {
     method: "POST",
@@ -81,16 +94,28 @@ export async function createReservation({ item_id, user_name }) {
 
 export async function getReservation(reservationId, reservationToken) {
   if (!BASE) {
-    const now = new Date().toISOString();
-    return {
-      id: reservationId,
-      item_id: "wood-001",
-      user_name: "(demo)",
-      qr_token: typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `qr-${Date.now()}`,
-      access_token: reservationToken || "demo-token",
-      status: "pending",
-      reserved_at: now,
-    };
+    // Demo mode: load persisted reservation created via createReservation
+    try {
+      const raw = sessionStorage.getItem("demo_reservations") || "{}";
+      const map = JSON.parse(raw);
+      const res = map[reservationId];
+      if (!res) {
+        const err = new Error("Reservation not found");
+        err.status = 404;
+        throw err;
+      }
+      if (reservationToken && res.access_token !== reservationToken) {
+        const err = new Error("Invalid reservation token");
+        err.status = 401;
+        throw err;
+      }
+      return res;
+    } catch (e) {
+      if (e && typeof e.status === "number") throw e;
+      const err = new Error("Failed to load reservation");
+      err.status = 502;
+      throw err;
+    }
   }
 
   const headers = {};

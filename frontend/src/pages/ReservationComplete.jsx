@@ -1,11 +1,12 @@
 import React, { useEffect, useState } from "react";
-import { useLocation, useParams } from "react-router-dom";
+import { useLocation, useParams, useNavigate } from "react-router-dom";
 import { QRCodeCanvas } from "qrcode.react";
 import api from "../api/client";
 
 export default function ReservationComplete() {
   const { id } = useParams();
   const location = useLocation();
+  const navigate = useNavigate();
   const [reservation, setReservation] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -39,7 +40,16 @@ export default function ReservationComplete() {
   }, [id, location.state]);
 
   if (loading) return <div className="p-4">読み込み中…</div>;
-  if (error) return <div className="p-4 text-red-600">{error}</div>;
+  if (error)
+    return (
+      <div className="p-4">
+        <div className="text-red-600 mb-3">{error}</div>
+        <div className="flex space-x-2">
+          <button onClick={() => navigate('/')} className="px-3 py-1 bg-[#2f6f3e] text-white rounded">一覧へ戻る</button>
+          <button onClick={() => navigate(-1)} className="px-3 py-1 bg-gray-200 rounded">前のページへ戻る</button>
+        </div>
+      </div>
+    );
   if (!reservation) return <div className="p-4">予約情報が見つかりません。</div>;
 
   return (
