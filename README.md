@@ -32,9 +32,22 @@ uvicorn main:app --reload
 
 ### infra / Supabase
 
-1. Supabase プロジェクトを作成する。
-2. `infra/schema.sql` を Supabase SQL Editor、または `supabase db push` で適用する。
-3. 接続情報（`SUPABASE_URL`, `SUPABASE_KEY` 等）は `backend/.env` に設定する（`.gitignore` 対象）。
+1. Supabase CLIをインストールし、`supabase login` を実行する。
+2. `supabase start` でローカル環境を起動するか、Supabaseプロジェクトを作成する。
+3. リモートを使う場合は `supabase link --project-ref <project-ref>` を実行する。
+4. `supabase db push` で `supabase/migrations/` のマイグレーションを適用する。
+5. SQL Editorを使う場合だけ、正本と同内容の補助ファイル `infra/schema.sql` を実行する。
+6. `backend/.env.example` を `backend/.env` にコピーし、SupabaseのURL・service_role key・許可するフロントエンドOrigin・スタッフAPIトークンを設定する。
+
+`SUPABASE_SERVICE_ROLE_KEY` はバックエンド専用です。フロントエンド、`VITE_` で始まる環境変数、ブラウザに絶対に公開しないでください。`.env` はコミットせず、実値は `backend/.env` のみに設定します。
+
+#### ローカル起動
+
+```bash
+supabase start
+```
+
+別ターミナルでフロントエンドとバックエンドを起動します。バックエンドは `backend/.env` の `SUPABASE_URL` と `SUPABASE_SERVICE_ROLE_KEY` を使ってSupabase APIへ接続します。予約照会には、予約作成レスポンスに含まれる `access_token` を `X-Reservation-Token` ヘッダーで指定します。これはQR検証用の `qr_token` やスタッフ用の `X-Staff-Token` とは別のトークンです。
 
 ## 技術スタック
 

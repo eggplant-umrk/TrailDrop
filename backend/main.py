@@ -6,16 +6,29 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import Client, create_client
 
-from models import Item, QRVerifyRequest, ReservationCreate, ReservationResponse
+from models import (
+    Item,
+    QRVerifyRequest,
+    QRVerifyResponse,
+    ReservationCreate,
+    ReservationCreateResponse,
+    ReservationResponse,
+)
 
 load_dotenv()
+
+
+def get_allowed_origins() -> list[str]:
+    configured_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173")
+    return [origin.strip() for origin in configured_origins.split(",") if origin.strip()]
+
 
 app = FastAPI(title="TrailDrop API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=get_allowed_origins(),
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -23,11 +36,11 @@ app.add_middleware(
 
 def get_supabase() -> Client:
     url = os.getenv("SUPABASE_URL")
-    key = os.getenv("SUPABASE_KEY")
+    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
     if not url or not key:
         raise HTTPException(
             status_code=503,
-            detail="SUPABASE_URL and SUPABASE_KEY must be configured",
+            detail="SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be configured",
         )
     return create_client(url, key)
 
@@ -61,7 +74,7 @@ def list_items():
         raise HTTPException(status_code=502, detail="Failed to fetch items") from exc
 
 
-@app.post("/reservations", response_model=ReservationResponse, status_code=201)
+@app.post("/reservations", response_model=ReservationCreateResponse, status_code=201)
 def create_reservation(reservation: ReservationCreate):
     try:
         response = (
@@ -85,13 +98,19 @@ def create_reservation(reservation: ReservationCreate):
 
 
 @app.get("/reservations/{reservation_id}", response_model=ReservationResponse)
-def get_reservation(reservation_id: str):
+def get_reservation(
+    reservation_id: str,
+    x_reservation_token: str | None = Header(default=None, alias="X-Reservation-Token"),
+):
+    if not x_reservation_token:
+        raise HTTPException(status_code=404, detail="Reservation not found")
     try:
         response = (
             get_supabase()
             .table("reservations")
             .select("*")
             .eq("id", reservation_id)
+            .eq("access_token", x_reservation_token)
             .limit(1)
             .execute()
         )
@@ -104,7 +123,7 @@ def get_reservation(reservation_id: str):
         raise HTTPException(status_code=502, detail="Failed to fetch reservation") from exc
 
 
-@app.post("/qr/verify", response_model=ReservationResponse)
+@app.post("/qr/verify", response_model=QRVerifyResponse)
 def verify_qr(
     request: QRVerifyRequest,
     x_staff_token: str | None = Header(default=None, alias="X-Staff-Token"),

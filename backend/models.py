@@ -28,5 +28,13 @@ class ReservationResponse(BaseModel):
     reserved_at: datetime | None = None
 
 
+class ReservationCreateResponse(ReservationResponse):
+    access_token: UUID
+
+
+class QRVerifyResponse(ReservationResponse):
+    pass
+
+
 class QRVerifyRequest(BaseModel):
     qr_token: UUID
