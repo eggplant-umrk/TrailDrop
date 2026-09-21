@@ -1,8 +1,17 @@
+import { BrowserRouter, Routes, Route } from "react-router-dom";
+import ItemList from "./pages/ItemList";
+import Reservation from "./pages/Reservation";
+import ReservationComplete from "./pages/ReservationComplete";
+
 function App() {
   return (
-    <div className="min-h-screen flex items-center justify-center bg-green-50">
-      <h1 className="text-3xl font-bold text-green-800">TrailDrop</h1>
-    </div>
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<ItemList />} />
+        <Route path="/reserve/:id" element={<Reservation />} />
+        <Route path="/complete/:id" element={<ReservationComplete />} />
+      </Routes>
+    </BrowserRouter>
   );
 }
 
