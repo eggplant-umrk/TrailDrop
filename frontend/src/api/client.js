@@ -58,6 +58,7 @@ export async function getItems() {
 
 export async function createReservation({ item_id, user_name, requested_at = null }) {
   if (!BASE) {
+    // Demo mode: persist reservations in sessionStorage so they survive reloads
     const now = new Date().toISOString();
     const id = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `demo-${Date.now()}`;
     const qr = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `qr-${Date.now()}`;
@@ -72,7 +73,16 @@ export async function createReservation({ item_id, user_name, requested_at = nul
       requested_at,
       reserved_at: now,
     };
-    sessionStorage.setItem(`traildrop_demo_reservation_${id}`, JSON.stringify(reservation));
+
+    try {
+      const raw = sessionStorage.getItem("demo_reservations") || "{}";
+      const map = JSON.parse(raw);
+      map[id] = reservation;
+      sessionStorage.setItem("demo_reservations", JSON.stringify(map));
+    } catch (e) {
+      // ignore storage errors in demo mode
+    }
+
     return reservation;
   }
   return await request(`/reservations`, {
@@ -84,22 +94,32 @@ export async function createReservation({ item_id, user_name, requested_at = nul
 
 export async function getReservation(reservationId, reservationToken) {
   if (!BASE) {
-    const stored = sessionStorage.getItem(`traildrop_demo_reservation_${reservationId}`);
-    if (stored) {
-      const reservation = JSON.parse(stored);
-      const { access_token: _accessToken, ...response } = reservation;
+    // Demo mode: load persisted reservation created via createReservation
+    try {
+      const raw = sessionStorage.getItem("demo_reservations") || "{}";
+      const map = JSON.parse(raw);
+      const res = map[reservationId];
+      if (!res) {
+        const err = new Error("Reservation not found");
+        err.status = 404;
+        throw err;
+      }
+      // Require a reservationToken and validate it against stored access_token.
+      // Previously the check skipped validation when reservationToken was missing,
+      // allowing anonymous access to demo reservations. Enforce presence and match.
+      if (!reservationToken || res.access_token !== reservationToken) {
+        const err = new Error("Invalid reservation token");
+        err.status = 401;
+        throw err;
+      }
+      const { access_token: _accessToken, ...response } = res;
       return response;
+    } catch (e) {
+      if (e && typeof e.status === "number") throw e;
+      const err = new Error("Failed to load reservation");
+      err.status = 502;
+      throw err;
     }
-    const now = new Date().toISOString();
-    return {
-      id: reservationId,
-      item_id: "wood-001",
-      user_name: "(demo)",
-      qr_token: typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `qr-${Date.now()}`,
-      status: "pending",
-      requested_at: null,
-      reserved_at: now,
-    };
   }
 
   const headers = {};
