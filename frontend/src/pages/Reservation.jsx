@@ -68,11 +68,20 @@ export default function Reservation() {
       setError("氏名を入力してください。");
       return;
     }
+    if (item.requiresDate && !date) {
+      setError("希望日時を入力してください。");
+      return;
+    }
 
     setSubmitting(true);
     setError(null);
     try {
-      const res = await api.createReservation({ item_id: item.id, user_name: name.trim() });
+      const requestedAt = item.requiresDate ? `${date}:00+09:00` : null;
+      const res = await api.createReservation({
+        item_id: item.id,
+        user_name: name.trim(),
+        requested_at: requestedAt,
+      });
       if (res?.access_token) {
         sessionStorage.setItem(`traildrop_access_token_${res.id}`, res.access_token);
       }
@@ -97,7 +106,7 @@ export default function Reservation() {
         {item.requiresDate && (
           <label className="block">
             <div className="text-sm">希望日時</div>
-            <input type="datetime-local" value={date} onChange={(e) => setDate(e.target.value)} className="mt-1 p-2 border rounded w-full" />
+            <input type="datetime-local" value={date} onChange={(e) => setDate(e.target.value)} required className="mt-1 p-2 border rounded w-full" />
           </label>
         )}
 

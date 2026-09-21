@@ -84,6 +84,11 @@ def create_reservation(reservation: ReservationCreate):
                 {
                     "p_item_id": str(reservation.item_id),
                     "p_user_name": reservation.user_name,
+                    "p_requested_at": (
+                        reservation.requested_at.isoformat()
+                        if reservation.requested_at is not None
+                        else None
+                    ),
                 },
             )
             .execute()

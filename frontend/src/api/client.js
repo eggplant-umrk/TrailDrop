@@ -56,39 +56,48 @@ export async function getItems() {
   return await request(`/items`, { method: "GET" });
 }
 
-export async function createReservation({ item_id, user_name }) {
+export async function createReservation({ item_id, user_name, requested_at = null }) {
   if (!BASE) {
     const now = new Date().toISOString();
     const id = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `demo-${Date.now()}`;
     const qr = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `qr-${Date.now()}`;
     const access = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `access-${Date.now()}`;
-    return {
+    const reservation = {
       id,
       item_id,
       user_name,
       qr_token: qr,
       access_token: access,
       status: "pending",
+      requested_at,
       reserved_at: now,
     };
+    sessionStorage.setItem(`traildrop_demo_reservation_${id}`, JSON.stringify(reservation));
+    return reservation;
   }
   return await request(`/reservations`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ item_id, user_name }),
+    body: JSON.stringify({ item_id, user_name, requested_at }),
   });
 }
 
 export async function getReservation(reservationId, reservationToken) {
   if (!BASE) {
+    const stored = sessionStorage.getItem(`traildrop_demo_reservation_${reservationId}`);
+    if (stored) {
+      const reservation = JSON.parse(stored);
+      const { access_token: _accessToken, ...response } = reservation;
+      return response;
+    }
     const now = new Date().toISOString();
     return {
       id: reservationId,
       item_id: "wood-001",
       user_name: "(demo)",
       qr_token: typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `qr-${Date.now()}`,
-      access_token: reservationToken || "demo-token",
       status: "pending",
+      requested_at: null,
       reserved_at: now,
     };
   }

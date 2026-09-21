@@ -3,6 +3,18 @@ import { useLocation, useParams } from "react-router-dom";
 import { QRCodeCanvas } from "qrcode.react";
 import api from "../api/client";
 
+function formatRequestedAt(value) {
+  return new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).format(new Date(value));
+}
+
 export default function ReservationComplete() {
   const { id } = useParams();
   const location = useLocation();
@@ -49,7 +61,9 @@ export default function ReservationComplete() {
         <div className="mb-3">予約番号: <span className="font-mono">{reservation.id}</span></div>
         <div className="mb-3">氏名: {reservation.user_name}</div>
         <div className="mb-3">商品: {reservation.item_id}</div>
-        {reservation.reserved_at && <div className="mb-3">日時: {reservation.reserved_at}</div>}
+        {reservation.requested_at && (
+          <div className="mb-3">希望日時: {formatRequestedAt(reservation.requested_at)}</div>
+        )}
         <div className="flex justify-center my-3">
           {reservation.qr_token ? (
             <QRCodeCanvas value={String(reservation.qr_token)} size={180} />
