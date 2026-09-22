@@ -1,6 +1,27 @@
 const BASE = import.meta.env.VITE_API_BASE_URL || "";
 const DEMO_MODE = import.meta.env.VITE_DEMO_MODE === "true";
 
+function errorMessage(json, status) {
+  const detail = json?.detail;
+  if (typeof detail === "string") return detail;
+
+  if (Array.isArray(detail)) {
+    const hasRequestedAtError = detail.some(
+      (entry) => Array.isArray(entry?.loc) && entry.loc.includes("requested_at"),
+    );
+    return hasRequestedAtError
+      ? "入力された日時が正しくありません。"
+      : "入力内容が正しくありません。";
+  }
+
+  if (detail && typeof detail === "object" && typeof detail.msg === "string") {
+    return detail.msg;
+  }
+  if (typeof json?.message === "string") return json.message;
+  if (status === 422) return "入力内容が正しくありません。";
+  return `HTTP ${status}`;
+}
+
 async function request(path, options = {}) {
   const url = BASE ? `${BASE}${path}` : null;
 
@@ -18,7 +39,7 @@ async function request(path, options = {}) {
   }
 
   if (!res.ok) {
-    const msg = json?.detail || json?.message || `HTTP ${res.status}`;
+    const msg = errorMessage(json, res.status);
     const err = new Error(msg);
     err.status = res.status;
     err.body = json;
