@@ -155,4 +155,12 @@ export async function getReservation(reservationId, reservationToken) {
   });
 }
 
-export default { getItems, createReservation, getReservation };
+export async function analyzeRoute({ origin, destination, departure_at }) {
+  return await request(`/routes/analyze`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ origin, destination, departure_at }),
+  });
+}
+
+export default { getItems, createReservation, getReservation, analyzeRoute };

@@ -13,7 +13,10 @@ from models import (
     ReservationCreate,
     ReservationCreateResponse,
     ReservationResponse,
+    RouteAnalysisRequest,
+    RouteAnalysisResponse,
 )
+from route_analysis import RouteAnalysisError, analyze_route
 
 load_dotenv()
 
@@ -166,3 +169,11 @@ def verify_qr(
         raise
     except Exception as exc:
         raise HTTPException(status_code=502, detail="Failed to verify QR token") from exc
+
+
+@app.post("/routes/analyze", response_model=RouteAnalysisResponse)
+def analyze_route_endpoint(request: RouteAnalysisRequest):
+    try:
+        return analyze_route(request, os.getenv("GOOGLE_MAPS_API_KEY"))
+    except RouteAnalysisError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc

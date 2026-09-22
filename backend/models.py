@@ -49,3 +49,25 @@ class QRVerifyResponse(ReservationResponse):
 
 class QRVerifyRequest(BaseModel):
     qr_token: UUID
+
+
+class RouteAnalysisRequest(BaseModel):
+    origin: str
+    destination: str
+    departure_at: datetime
+
+    @field_validator("departure_at")
+    @classmethod
+    def departure_at_requires_timezone(cls, value: datetime):
+        if value.utcoffset() is None:
+            raise ValueError("departure_at must include a timezone offset")
+        return value
+
+
+class RouteAnalysisResponse(BaseModel):
+    origin: str
+    destination: str
+    pass_point: str
+    pass_at: datetime
+    total_duration_minutes: int
+    total_distance_meters: int
