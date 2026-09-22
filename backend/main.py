@@ -56,6 +56,10 @@ def require_staff_token(token: str | None) -> None:
 def reservation_error(exc: Exception) -> HTTPException:
     code = getattr(exc, "code", "")
     message = getattr(exc, "message", str(exc))
+    if "EXPERIENCE_DATE_REQUIRED" in message:
+        return HTTPException(status_code=422, detail="Experience date is required")
+    if "REQUESTED_AT_IN_PAST" in message:
+        return HTTPException(status_code=422, detail="Requested date must be in the future")
     if code == "P0002" or "ITEM_NOT_FOUND" in message:
         return HTTPException(status_code=404, detail="Item not found")
     if code == "P0001" or "OUT_OF_STOCK" in message:
@@ -84,6 +88,11 @@ def create_reservation(reservation: ReservationCreate):
                 {
                     "p_item_id": str(reservation.item_id),
                     "p_user_name": reservation.user_name,
+                    "p_requested_at": (
+                        reservation.requested_at.isoformat()
+                        if reservation.requested_at is not None
+                        else None
+                    ),
                 },
             )
             .execute()
