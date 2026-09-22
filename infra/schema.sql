@@ -107,6 +107,14 @@ begin
         raise exception 'ITEM_NOT_FOUND' using errcode = 'P0002';
     end if;
 
+    if item_type = 'experience' and p_requested_at is null then
+        raise exception 'EXPERIENCE_DATE_REQUIRED' using errcode = '22023';
+    end if;
+
+    if p_requested_at is not null and p_requested_at <= now() then
+        raise exception 'REQUESTED_AT_IN_PAST' using errcode = '22023';
+    end if;
+
     insert into public.reservations (item_id, user_name, requested_at)
     values (
         p_item_id,

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import UUID
 
 from pydantic import BaseModel, field_validator
@@ -24,6 +24,8 @@ class ReservationCreate(BaseModel):
     def requested_at_requires_timezone(cls, value: datetime | None):
         if value is not None and value.utcoffset() is None:
             raise ValueError("requested_at must include a timezone offset")
+        if value is not None and value <= datetime.now(timezone.utc):
+            raise ValueError("requested_at must be in the future")
         return value
 
 

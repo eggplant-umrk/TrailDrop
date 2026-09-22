@@ -1,10 +1,11 @@
 const BASE = import.meta.env.VITE_API_BASE_URL || "";
+const DEMO_MODE = import.meta.env.VITE_DEMO_MODE === "true";
 
 async function request(path, options = {}) {
   const url = BASE ? `${BASE}${path}` : null;
 
   if (!url) {
-    throw new Error("NO_API_BASE");
+    throw new Error("VITE_API_BASE_URL is not configured");
   }
 
   const res = await fetch(url, options);
@@ -49,7 +50,7 @@ function demoGetItems() {
 }
 
 export async function getItems() {
-  if (!BASE) {
+  if (DEMO_MODE) {
     await new Promise((r) => setTimeout(r, 200));
     return demoGetItems();
   }
@@ -57,7 +58,7 @@ export async function getItems() {
 }
 
 export async function createReservation({ item_id, user_name, requested_at = null }) {
-  if (!BASE) {
+  if (DEMO_MODE) {
     // Demo mode: persist reservations in sessionStorage so they survive reloads
     const now = new Date().toISOString();
     const id = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `demo-${Date.now()}`;
@@ -93,7 +94,7 @@ export async function createReservation({ item_id, user_name, requested_at = nul
 }
 
 export async function getReservation(reservationId, reservationToken) {
-  if (!BASE) {
+  if (DEMO_MODE) {
     // Demo mode: load persisted reservation created via createReservation
     try {
       const raw = sessionStorage.getItem("demo_reservations") || "{}";

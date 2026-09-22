@@ -2,6 +2,11 @@ import React, { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import api from "../api/client";
 
+function minimumJapanDateTime() {
+  const oneMinuteFromNowInJapan = Date.now() + 9 * 60 * 60 * 1000 + 60 * 1000;
+  return new Date(oneMinuteFromNowInJapan).toISOString().slice(0, 16);
+}
+
 export default function Reservation() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -32,24 +37,7 @@ export default function Reservation() {
           });
         }
       } catch (e) {
-        if (e.message === "NO_API_BASE") {
-          const demo = await api.getItems();
-          const found = (demo || []).find((it) => String(it.id) === String(id));
-          if (found) {
-            setItem({
-              id: found.id,
-              name: found.title,
-              price: found.price,
-              location: found.location_name,
-              requiresDate: found.type === "experience",
-              stock: found.stock,
-            });
-          } else {
-            setError("指定された商品が見つかりません。");
-          }
-        } else {
-          setError(e.message || "Failed to load item");
-        }
+        setError(e.message || "Failed to load item");
       } finally {
         if (mounted) setLoading(false);
       }
@@ -106,7 +94,7 @@ export default function Reservation() {
         {item.requiresDate && (
           <label className="block">
             <div className="text-sm">希望日時</div>
-            <input type="datetime-local" value={date} onChange={(e) => setDate(e.target.value)} required className="mt-1 p-2 border rounded w-full" />
+            <input type="datetime-local" value={date} min={minimumJapanDateTime()} onChange={(e) => setDate(e.target.value)} required className="mt-1 p-2 border rounded w-full" />
           </label>
         )}
 
