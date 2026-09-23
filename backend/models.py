@@ -49,3 +49,42 @@ class QRVerifyResponse(ReservationResponse):
 
 class QRVerifyRequest(BaseModel):
     qr_token: UUID
+
+
+ROUTE_LOCATION_MIN_LENGTH = 1
+ROUTE_LOCATION_MAX_LENGTH = 200
+
+
+class RouteAnalysisRequest(BaseModel):
+    origin: str
+    destination: str
+    departure_at: datetime
+
+    @field_validator("origin", "destination")
+    @classmethod
+    def location_must_be_trimmed_and_sized(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not (ROUTE_LOCATION_MIN_LENGTH <= len(trimmed) <= ROUTE_LOCATION_MAX_LENGTH):
+            raise ValueError(
+                f"must be between {ROUTE_LOCATION_MIN_LENGTH} and "
+                f"{ROUTE_LOCATION_MAX_LENGTH} characters after trimming"
+            )
+        return trimmed
+
+    @field_validator("departure_at")
+    @classmethod
+    def departure_at_requires_timezone(cls, value: datetime):
+        if value.utcoffset() is None:
+            raise ValueError("departure_at must include a timezone offset")
+        if value <= datetime.now(timezone.utc):
+            raise ValueError("departure_at must be in the future")
+        return value
+
+
+class RouteAnalysisResponse(BaseModel):
+    origin: str
+    destination: str
+    pass_point: str
+    pass_at: datetime
+    total_duration_minutes: int
+    total_distance_meters: int

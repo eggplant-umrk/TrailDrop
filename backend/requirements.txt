@@ -3,3 +3,5 @@ uvicorn
 supabase
 pydantic
 python-dotenv
+httpx
+pytest

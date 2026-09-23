@@ -1,8 +1,10 @@
 import os
 import secrets
+import threading
+import time
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import Client, create_client
 
@@ -13,7 +15,10 @@ from models import (
     ReservationCreate,
     ReservationCreateResponse,
     ReservationResponse,
+    RouteAnalysisRequest,
+    RouteAnalysisResponse,
 )
+from route_analysis import RouteAnalysisError, analyze_route
 
 load_dotenv()
 
@@ -51,6 +56,132 @@ def require_staff_token(token: str | None) -> None:
         raise HTTPException(status_code=503, detail="Staff authentication is not configured")
     if not token or not secrets.compare_digest(token, expected_token):
         raise HTTPException(status_code=401, detail="Invalid staff token")
+
+
+# /routes/analyzeは一般利用者向けの公開画面(/route-test)から呼ばれるため、
+# スタッフ専用のSTAFF_API_TOKENは再利用できない。ROUTE_ANALYSIS_CLIENT_KEYは
+# ブラウザに埋め込まれる前提の値であり秘匿は期待できないが、/docsからエンドポイント
+# を見つけて叩くだけの無差別botや直接curlを弾き、下のレート制限と組み合わせて
+# Google Routes APIのquota消費・想定外課金のリスクを下げる。
+def require_route_analysis_client_key(client_key: str | None) -> None:
+    expected_key = os.getenv("ROUTE_ANALYSIS_CLIENT_KEY")
+    if not expected_key:
+        raise HTTPException(
+            status_code=503, detail="Route analysis authentication is not configured"
+        )
+    if not client_key or not secrets.compare_digest(client_key, expected_key):
+        raise HTTPException(status_code=401, detail="Invalid route analysis client key")
+
+
+# 単一プロセス構成のためインメモリでIP単位のスライディングウィンドウ制限を行う。
+# 複数プロセス/インスタンスへスケールする場合はRedis等の共有ストアへ移行が必要。
+ROUTE_ANALYSIS_RATE_LIMIT = 10
+ROUTE_ANALYSIS_RATE_WINDOW_SECONDS = 60.0
+# 期限切れIPエントリの一掃(cleanup)を実行する最短間隔。リクエストのたびに全IPを
+# 掃除すると計算量がリクエスト数に比例してしまうため、この間隔に達した時だけ
+# 全体を掃除する。ウィンドウと同じ長さにすることで、非アクティブなIPのエントリが
+# 最大でもウィンドウ2つ分程度しかメモリに残らないようにする。
+ROUTE_ANALYSIS_RATE_LIMIT_CLEANUP_INTERVAL_SECONDS = ROUTE_ANALYSIS_RATE_WINDOW_SECONDS
+_route_analysis_rate_lock = threading.Lock()
+_route_analysis_request_log: dict[str, list[float]] = {}
+_route_analysis_rate_limit_last_cleanup = 0.0
+
+
+def _cleanup_route_analysis_rate_limit_locked(now: float) -> None:
+    """呼び出し元で_route_analysis_rate_lockを保持している前提の内部関数。
+    ウィンドウ内に有効なリクエストが1件もないIPのエントリを削除する。
+    """
+
+    global _route_analysis_rate_limit_last_cleanup
+    if now - _route_analysis_rate_limit_last_cleanup < ROUTE_ANALYSIS_RATE_LIMIT_CLEANUP_INTERVAL_SECONDS:
+        return
+    window_start = now - ROUTE_ANALYSIS_RATE_WINDOW_SECONDS
+    stale_ips = [
+        ip
+        for ip, timestamps in _route_analysis_request_log.items()
+        if not any(t > window_start for t in timestamps)
+    ]
+    for ip in stale_ips:
+        del _route_analysis_request_log[ip]
+    _route_analysis_rate_limit_last_cleanup = now
+
+
+def enforce_route_analysis_rate_limit(client_ip: str) -> None:
+    now = time.monotonic()
+    window_start = now - ROUTE_ANALYSIS_RATE_WINDOW_SECONDS
+    with _route_analysis_rate_lock:
+        _cleanup_route_analysis_rate_limit_locked(now)
+        recent = [t for t in _route_analysis_request_log.get(client_ip, []) if t > window_start]
+        if len(recent) >= ROUTE_ANALYSIS_RATE_LIMIT:
+            _route_analysis_request_log[client_ip] = recent
+            raise HTTPException(
+                status_code=429,
+                detail="Too many route analysis requests. Please try again later.",
+            )
+        recent.append(now)
+        _route_analysis_request_log[client_ip] = recent
+
+
+# 同一条件(origin/destination/departure_at)の短時間キャッシュ。連続クリックや
+# 同一条件の再試行でGoogle Routes APIを重複して呼ばないようにする。
+#
+# 「同一条件」とは以下の3つが一致することを指す。
+#   - trim済みのorigin文字列が完全一致 (Pydanticのvalidatorで既にtrim済み)
+#   - trim済みのdestination文字列が完全一致
+#   - departure_atが指す瞬間(instant)が一致
+# departure_atは`.timestamp()`(UTC基準のPOSIXタイムスタンプ)で比較する。これは
+# "+09:00"表記と"+00:00"表記など、同じ瞬間を異なるtimezone表記で送った場合でも
+# 正しく同一条件と判定するための正規化であり、実際に異なる出発時刻を同一視する
+# ものではない(1秒でもずれれば別キーになる)。origin/destinationの表記や
+# departure_atの値そのものを書き換えたり丸めたりすることはない。
+ROUTE_ANALYSIS_CACHE_TTL_SECONDS = 60.0
+# キャッシュのcleanupもレート制限と同じ考え方で、TTLと同じ間隔でしか全体を
+# 掃除しない。
+ROUTE_ANALYSIS_CACHE_CLEANUP_INTERVAL_SECONDS = ROUTE_ANALYSIS_CACHE_TTL_SECONDS
+_route_analysis_cache_lock = threading.Lock()
+_route_analysis_cache: dict[tuple[str, str, float], tuple[float, RouteAnalysisResponse]] = {}
+_route_analysis_cache_last_cleanup = 0.0
+
+
+def _route_analysis_cache_key(request: RouteAnalysisRequest) -> tuple[str, str, float]:
+    return (request.origin, request.destination, request.departure_at.timestamp())
+
+
+def _cleanup_route_analysis_cache_locked(now: float) -> None:
+    """呼び出し元で_route_analysis_cache_lockを保持している前提の内部関数。
+    TTLを超えたキャッシュエントリを削除する。
+    """
+
+    global _route_analysis_cache_last_cleanup
+    if now - _route_analysis_cache_last_cleanup < ROUTE_ANALYSIS_CACHE_CLEANUP_INTERVAL_SECONDS:
+        return
+    expired_keys = [
+        key
+        for key, (cached_at, _response) in _route_analysis_cache.items()
+        if now - cached_at > ROUTE_ANALYSIS_CACHE_TTL_SECONDS
+    ]
+    for key in expired_keys:
+        del _route_analysis_cache[key]
+    _route_analysis_cache_last_cleanup = now
+
+
+def get_cached_route_analysis(key: tuple[str, str, float]) -> RouteAnalysisResponse | None:
+    now = time.monotonic()
+    with _route_analysis_cache_lock:
+        _cleanup_route_analysis_cache_locked(now)
+        entry = _route_analysis_cache.get(key)
+        if entry is None:
+            return None
+        cached_at, cached_response = entry
+        if now - cached_at > ROUTE_ANALYSIS_CACHE_TTL_SECONDS:
+            del _route_analysis_cache[key]
+            return None
+        return cached_response
+
+
+def store_route_analysis_cache(key: tuple[str, str, float], response: RouteAnalysisResponse) -> None:
+    with _route_analysis_cache_lock:
+        _route_analysis_cache[key] = (time.monotonic(), response)
 
 
 def reservation_error(exc: Exception) -> HTTPException:
@@ -166,3 +297,28 @@ def verify_qr(
         raise
     except Exception as exc:
         raise HTTPException(status_code=502, detail="Failed to verify QR token") from exc
+
+
+@app.post("/routes/analyze", response_model=RouteAnalysisResponse)
+def analyze_route_endpoint(
+    request: RouteAnalysisRequest,
+    http_request: Request,
+    x_client_key: str | None = Header(default=None, alias="X-Client-Key"),
+):
+    require_route_analysis_client_key(x_client_key)
+
+    client_ip = http_request.client.host if http_request.client else "unknown"
+    enforce_route_analysis_rate_limit(client_ip)
+
+    cache_key = _route_analysis_cache_key(request)
+    cached_response = get_cached_route_analysis(cache_key)
+    if cached_response is not None:
+        return cached_response
+
+    try:
+        response = analyze_route(request, os.getenv("GOOGLE_MAPS_API_KEY"))
+    except RouteAnalysisError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+    store_route_analysis_cache(cache_key, response)
+    return response
