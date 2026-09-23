@@ -59,6 +59,8 @@ function demoGetItems() {
       price: 500,
       stock: 20,
       location_name: "道の駅 ロック・ガーデンひちそう",
+      pickup_available_from: "09:00:00",
+      pickup_available_to: "18:00:00",
     },
     {
       id: "log-experience-001",
@@ -67,6 +69,8 @@ function demoGetItems() {
       price: 1500,
       stock: 8,
       location_name: "道の駅 ロック・ガーデンひちそう",
+      pickup_available_from: null,
+      pickup_available_to: null,
     },
   ];
 }
