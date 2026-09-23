@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 from uuid import UUID
 
 from pydantic import BaseModel, field_validator
@@ -12,6 +12,11 @@ class Item(BaseModel):
     stock: int
     location_name: str
     created_at: datetime | None = None
+    # 商品の受取可能時間(毎日繰り返す時間帯)。どちらかがNoneの場合は
+    # 「受取可能時間が未設定」を意味し、「常に受取可能」とは解釈しない
+    # (Frontend側の時間帯フィルタで、未設定の商品は表示対象から除外する)。
+    pickup_available_from: time | None = None
+    pickup_available_to: time | None = None
 
 
 class ReservationCreate(BaseModel):

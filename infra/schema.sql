@@ -12,6 +12,12 @@ create table if not exists public.items (
     created_at timestamptz default now()
 );
 
+-- Daily recurring pickup-availability window. Null on either column means
+-- "no pickup window recorded" -- not "always available".
+alter table public.items
+    add column if not exists pickup_available_from time,
+    add column if not exists pickup_available_to time;
+
 create table if not exists public.reservations (
     id uuid primary key default gen_random_uuid(),
     item_id uuid not null references public.items(id),
@@ -58,6 +64,20 @@ begin
     ) then
         alter table public.items
             add constraint items_stock_nonnegative check (stock >= 0);
+    end if;
+
+    if not exists (
+        select 1
+        from pg_constraint
+        where conname = 'items_pickup_window_consistent'
+          and conrelid = 'public.items'::regclass
+    ) then
+        alter table public.items
+            add constraint items_pickup_window_consistent
+            check (
+                (pickup_available_from is null) = (pickup_available_to is null)
+                and (pickup_available_from is null or pickup_available_from < pickup_available_to)
+            );
     end if;
 end
 $$;
@@ -159,3 +179,13 @@ values
         '七宗町地域交流スペース'
     )
 on conflict (id) do nothing;
+
+-- Example pickup hours for the seeded pickup items. The experience item is
+-- intentionally left without a window.
+update public.items
+set pickup_available_from = '09:00',
+    pickup_available_to = '18:00'
+where id in (
+    '11111111-1111-4111-8111-111111111111',
+    '22222222-2222-4222-8222-222222222222'
+);
