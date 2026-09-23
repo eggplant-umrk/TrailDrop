@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { useParams, useNavigate, useLocation } from "react-router-dom";
 import api from "../api/client";
 
 function minimumJapanDateTime() {
@@ -10,6 +10,12 @@ function minimumJapanDateTime() {
 export default function Reservation() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
+  // RouteTestから遷移してきた場合のみ、Google Maps引き継ぎに使う経路情報を
+  // 受け取る。ItemListから直接来た場合はundefinedのままで、以降も一切
+  // 補完しない(推測でdestinationを作らない)。
+  const { origin: routeOrigin, destination: routeDestination, passPoint: routePassPoint } =
+    location.state || {};
   const [item, setItem] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -73,7 +79,24 @@ export default function Reservation() {
       if (res?.access_token) {
         sessionStorage.setItem(`traildrop_access_token_${res.id}`, res.access_token);
       }
-      navigate(`/complete/${res.id}`, { replace: true, state: { access_token: res?.access_token || null } });
+
+      const hasRouteContext = Boolean(routeOrigin && routeDestination && routePassPoint);
+      if (hasRouteContext) {
+        sessionStorage.setItem(
+          `traildrop_route_${res.id}`,
+          JSON.stringify({ origin: routeOrigin, destination: routeDestination, passPoint: routePassPoint }),
+        );
+      }
+
+      navigate(`/complete/${res.id}`, {
+        replace: true,
+        state: {
+          access_token: res?.access_token || null,
+          ...(hasRouteContext
+            ? { origin: routeOrigin, destination: routeDestination, passPoint: routePassPoint }
+            : {}),
+        },
+      });
     } catch (e) {
       const msg = e.message || "予約に失敗しました";
       setError(msg);
