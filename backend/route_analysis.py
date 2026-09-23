@@ -26,6 +26,41 @@ PASS_POINT = "道の駅 ロック・ガーデンひちそう"
 # 不要なpolylineや案内情報を取得せず、レスポンス量とGoogle側の処理を抑える。
 FIELD_MASK = "routes.duration,routes.distanceMeters,routes.legs.duration"
 
+# GoogleのAPI基盤(認証・APIキー・quota・組織ポリシー等)起因のエラーには、
+# google.rpc.ErrorInfoのdomainとして"googleapis.com"が付与される。このdomainは
+# Google自身が「Service Infrastructure用に予約されている」と定義しており
+# (参照: https://github.com/googleapis/googleapis/blob/master/google/api/error_reason.proto)、
+# 配下のreason(API_KEY_INVALID, RATE_LIMIT_EXCEEDED, SERVICE_DISABLED等、
+# 実測ではAPIキーが無効な場合に"API_KEY_INVALID"が返ることを確認済み)は
+# いずれもBackend運用者が対応すべき問題であり、origin/destination/
+# departureTimeといった利用者の入力エラーではない。
+# 個々のreason文字列を推測して列挙するのではなく、ドキュメントに根拠のある
+# このdomainの有無だけで判定する。
+_GOOGLE_SERVICE_INFRA_ERROR_DOMAIN = "googleapis.com"
+
+
+def _is_google_service_infra_error(response: httpx.Response) -> bool:
+    """GoogleのHTTP 400 INVALID_ARGUMENTが、APIキー・権限・quota等の
+    Service Infrastructure(Backend側で対応すべき問題)に起因すると
+    判断できた場合にTrueを返す。
+
+    レスポンス本文を解釈できない場合や、想定外の形式だった場合は、
+    Backendの設定ミスを利用者の入力エラー(422)として見せてしまわないよう、
+    安全側に倒してTrue(=502として扱う)を返す。
+    """
+
+    try:
+        body = response.json()
+    except ValueError:
+        return True
+    error = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(error, dict):
+        return True
+    for detail in error.get("details") or []:
+        if isinstance(detail, dict) and detail.get("domain") == _GOOGLE_SERVICE_INFRA_ERROR_DOMAIN:
+            return True
+    return False
+
 
 class RouteAnalysisError(Exception):
     """ルート分析で想定される失敗をFastAPIのHTTPステータスへ渡す例外。"""
@@ -95,9 +130,24 @@ def analyze_route(
         response = http_client.post(ROUTES_API_URL, headers=headers, json=payload)
         response.raise_for_status()
         data = response.json()
+    except httpx.HTTPStatusError as exc:
+        # GoogleのINVALID_ARGUMENT(400)は、解決できないorigin/destinationや
+        # departureTimeがGoogle側の制約に合わない場合の他に、APIキーが無効/未許可
+        # といったBackend設定の問題でも返ってくる(実測で確認済み)。後者を利用者の
+        # 入力エラーとして422にすると障害を利用者のせいに見せてしまうため、
+        # Service Infrastructure起因と判定できなかった場合のみ422にする。
+        # 判定できない場合は502(外部API障害扱い)側へ倒し、Googleの生エラーは
+        # どちらの場合も露出しない。
+        if exc.response.status_code == 400 and not _is_google_service_infra_error(exc.response):
+            raise RouteAnalysisError(
+                422,
+                "Origin, destination, or departure time is not valid for route "
+                "calculation",
+            ) from exc
+        raise RouteAnalysisError(502, "Google Routes API request failed") from exc
     except (httpx.HTTPError, ValueError) as exc:
-        # Googleの4xx/5xx、通信失敗、不正JSONはクライアント入力エラーと断定せず、
-        # 上流サービスの失敗として統一して502を返す。API key等の詳細は露出しない。
+        # 上記以外の通信失敗（タイムアウト・接続不可）や不正JSONは、外部サービス
+        # 障害として統一して502を返す。API key等の詳細は露出しない。
         raise RouteAnalysisError(502, "Google Routes API request failed") from exc
     finally:
         if owns_client:

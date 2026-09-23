@@ -1,5 +1,6 @@
 const BASE = import.meta.env.VITE_API_BASE_URL || "";
 const DEMO_MODE = import.meta.env.VITE_DEMO_MODE === "true";
+const ROUTE_ANALYSIS_CLIENT_KEY = import.meta.env.VITE_ROUTE_ANALYSIS_CLIENT_KEY || "";
 
 function errorMessage(json, status) {
   const detail = json?.detail;
@@ -158,7 +159,10 @@ export async function getReservation(reservationId, reservationToken) {
 export async function analyzeRoute({ origin, destination, departure_at }) {
   return await request(`/routes/analyze`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "X-Client-Key": ROUTE_ANALYSIS_CLIENT_KEY,
+    },
     body: JSON.stringify({ origin, destination, departure_at }),
   });
 }
