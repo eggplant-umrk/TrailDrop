@@ -171,4 +171,51 @@ export async function analyzeRoute({ origin, destination, departure_at }) {
   });
 }
 
-export default { getItems, createReservation, getReservation, analyzeRoute };
+export async function verifyQr(qrToken, staffToken) {
+  if (DEMO_MODE) {
+    // Demo mode: there is no real STAFF_API_TOKEN to compare against, so any
+    // non-empty value is accepted (see main.py's require_staff_token for the
+    // real behavior this stands in for).
+    if (!staffToken) {
+      const err = new Error("Invalid staff token");
+      err.status = 401;
+      throw err;
+    }
+    try {
+      const raw = sessionStorage.getItem("demo_reservations") || "{}";
+      const map = JSON.parse(raw);
+      const entry = Object.values(map).find((res) => res.qr_token === qrToken);
+      if (!entry) {
+        const err = new Error("QR token not found");
+        err.status = 404;
+        throw err;
+      }
+      if (entry.status === "completed") {
+        const err = new Error("Reservation is already completed");
+        err.status = 409;
+        throw err;
+      }
+      entry.status = "completed";
+      map[entry.id] = entry;
+      sessionStorage.setItem("demo_reservations", JSON.stringify(map));
+      const { access_token: _accessToken, ...response } = entry;
+      return response;
+    } catch (e) {
+      if (e && typeof e.status === "number") throw e;
+      const err = new Error("Failed to verify QR token");
+      err.status = 502;
+      throw err;
+    }
+  }
+
+  return await request(`/qr/verify`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Staff-Token": staffToken,
+    },
+    body: JSON.stringify({ qr_token: qrToken }),
+  });
+}
+
+export default { getItems, createReservation, getReservation, analyzeRoute, verifyQr };
