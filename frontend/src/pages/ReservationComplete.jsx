@@ -81,6 +81,12 @@ export default function ReservationComplete() {
             <div className="text-sm text-gray-500">(QR生成用のトークンがありません)</div>
           )}
         </div>
+        {reservation.qr_token && (
+          <div className="mb-3 text-center">
+            <div className="text-xs text-gray-500">QRが読み取れない場合：</div>
+            <div className="font-mono text-sm break-all">{reservation.qr_token}</div>
+          </div>
+        )}
         <div className="text-xs text-gray-500">この画面を現地スタッフに提示してください。</div>
       </div>
     </div>
