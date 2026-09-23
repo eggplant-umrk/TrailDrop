@@ -126,15 +126,20 @@ export default function ReservationComplete() {
         <div className="text-xs text-gray-500">この画面を現地スタッフに提示してください。</div>
 
         {routeContext && (
-          <button
-            type="button"
-            onClick={() =>
-              window.open(buildGoogleMapsUrl(routeContext), "_blank", "noopener,noreferrer")
-            }
-            className="mt-4 w-full rounded px-4 py-2 font-medium text-white bg-[#2f6f3e]"
-          >
-            Google Mapsでルートを開く
-          </button>
+          <div className="mt-4">
+            <button
+              type="button"
+              onClick={() =>
+                window.open(buildGoogleMapsUrl(routeContext), "_blank", "noopener,noreferrer")
+              }
+              className="w-full rounded px-4 py-2 font-medium text-white bg-[#2f6f3e]"
+            >
+              Google Mapsでルートを開く
+            </button>
+            <p className="mt-1 text-xs text-gray-500">
+              現在地から、受取地点を経由して目的地へのルートを開きます
+            </p>
+          </div>
         )}
       </div>
     </div>

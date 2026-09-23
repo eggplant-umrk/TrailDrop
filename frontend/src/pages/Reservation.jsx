@@ -82,10 +82,18 @@ export default function Reservation() {
 
       const hasRouteContext = Boolean(routeOrigin && routeDestination && routePassPoint);
       if (hasRouteContext) {
-        sessionStorage.setItem(
-          `traildrop_route_${res.id}`,
-          JSON.stringify({ origin: routeOrigin, destination: routeDestination, passPoint: routePassPoint }),
-        );
+        // route情報は補助データ(Google Mapsボタン表示用)であり、これの保存に
+        // 失敗しても予約自体は成立させる。外側のtry/catchに巻き込むと、予約は
+        // 成功しているのに完了画面へ遷移できなくなってしまうため個別に囲む。
+        try {
+          sessionStorage.setItem(
+            `traildrop_route_${res.id}`,
+            JSON.stringify({ origin: routeOrigin, destination: routeDestination, passPoint: routePassPoint }),
+          );
+        } catch (storageError) {
+          // 保存できなくても無視する。完了画面でGoogle Mapsボタンが
+          // 表示されない可能性があるだけで、予約完了自体は継続する。
+        }
       }
 
       navigate(`/complete/${res.id}`, {
