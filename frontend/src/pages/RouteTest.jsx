@@ -234,6 +234,7 @@ export default function RouteTest() {
 
             <section className="mt-5 bg-white p-4 shadow-sm rounded-md">
               <h2 className="text-lg font-semibold">受取時間を設定</h2>
+              <p className="mt-1 text-xs text-gray-500">通過予定時刻の前後で調整できます</p>
               <p className="mt-1 text-sm text-gray-600">
                 受取時間: {formatJapanTime(windowStartDate)}〜{formatJapanTime(windowEndDate)}
               </p>
@@ -269,11 +270,20 @@ export default function RouteTest() {
                 <p className="mt-3 text-sm text-red-600">{itemsError}</p>
               )}
 
-              {!itemsLoading && !itemsError && timeFilteredItems.length === 0 && (
+              {!itemsLoading && !itemsError && matchedItems.length === 0 && (
                 <p className="mt-3 text-sm text-gray-600">
                   現在このルートで受け取れる商品はありません。
                 </p>
               )}
+
+              {!itemsLoading &&
+                !itemsError &&
+                matchedItems.length > 0 &&
+                timeFilteredItems.length === 0 && (
+                  <p className="mt-3 text-sm text-gray-600">
+                    この受取時間に受け取れる商品はありません。受取時間をずらすと見つかる場合があります。
+                  </p>
+                )}
 
               {!itemsLoading && !itemsError && timeFilteredItems.length > 0 && (
                 <ul className="mt-3 space-y-3">
