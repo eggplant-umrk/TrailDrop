@@ -304,6 +304,11 @@ export default function RouteTest() {
                       </div>
                       <Link
                         to={`/reserve/${item.id}`}
+                        state={{
+                          origin: result.origin,
+                          destination: result.destination,
+                          passPoint: result.pass_point,
+                        }}
                         className="shrink-0 rounded px-3 py-2 text-sm font-medium text-white bg-[#2f6f3e]"
                       >
                         予約へ進む

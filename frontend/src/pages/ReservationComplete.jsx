@@ -15,6 +15,16 @@ function formatRequestedAt(value) {
   }).format(new Date(value));
 }
 
+function buildGoogleMapsUrl({ destination, passPoint }) {
+  const params = new URLSearchParams({
+    api: "1",
+    destination,
+    waypoints: passPoint,
+    travelmode: "driving",
+  });
+  return `https://www.google.com/maps/dir/?${params.toString()}`;
+}
+
 export default function ReservationComplete() {
   const { id } = useParams();
   const location = useLocation();
@@ -50,6 +60,32 @@ export default function ReservationComplete() {
     load();
     return () => (mounted = false);
   }, [id, location.state]);
+
+  // RouteTest経由で予約した場合のみ、Google Maps引き継ぎに使う経路情報を持つ。
+  // ItemListから直接予約した場合や、stateを保持しないリロード直後は
+  // location.stateが空になるため、access_tokenと同じくsessionStorageへ
+  // フォールバックする。いずれにもなければroute情報はnullのままとし、
+  // 目的地を推測で補うことはしない。
+  let routeContext =
+    location.state?.origin && location.state?.destination && location.state?.passPoint
+      ? {
+          origin: location.state.origin,
+          destination: location.state.destination,
+          passPoint: location.state.passPoint,
+        }
+      : null;
+
+  if (!routeContext) {
+    try {
+      const raw = sessionStorage.getItem(`traildrop_route_${id}`);
+      const parsed = raw ? JSON.parse(raw) : null;
+      if (parsed?.origin && parsed?.destination && parsed?.passPoint) {
+        routeContext = parsed;
+      }
+    } catch (e) {
+      // 壊れたsessionStorageの内容はroute情報なしとして扱う。
+    }
+  }
 
   if (loading) return <div className="p-4">読み込み中…</div>;
   if (error)
@@ -88,6 +124,23 @@ export default function ReservationComplete() {
           </div>
         )}
         <div className="text-xs text-gray-500">この画面を現地スタッフに提示してください。</div>
+
+        {routeContext && (
+          <div className="mt-4">
+            <button
+              type="button"
+              onClick={() =>
+                window.open(buildGoogleMapsUrl(routeContext), "_blank", "noopener,noreferrer")
+              }
+              className="w-full rounded px-4 py-2 font-medium text-white bg-[#2f6f3e]"
+            >
+              Google Mapsでルートを開く
+            </button>
+            <p className="mt-1 text-xs text-gray-500">
+              現在地から、受取地点を経由して目的地へのルートを開きます
+            </p>
+          </div>
+        )}
       </div>
     </div>
   );
