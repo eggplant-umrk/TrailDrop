@@ -87,6 +87,13 @@ class FakeSupabase:
             raise FakePostgrestError("RESERVATION_NOT_CANCELLABLE", "P0004")
 
         reservation["status"] = "cancelled"
+        # PM review m2: mirrors cancel_reservation_with_stock's single
+        # UPDATE (…SET status = 'cancelled', payment_status = CASE WHEN
+        # payment_status = 'paid' THEN 'cancelled' ELSE payment_status
+        # END…) -- 'paid' becomes 'cancelled', anything else (e.g.
+        # 'pending') is left as-is.
+        if reservation.get("payment_status") == "paid":
+            reservation["payment_status"] = "cancelled"
         self.items[reservation["item_id"]]["stock"] += 1
         return FakeRpcResult([deepcopy(reservation)])
 
@@ -141,16 +148,17 @@ class TestCancelReservation:
         assert response.status_code == 200
         assert response.json()["status"] == "cancelled"
 
-    def test_cancelling_a_paid_reservation_leaves_payment_fields_unchanged(
+    def test_cancelling_a_paid_reservation_also_cancels_its_payment(
         self, client, fake_supabase
     ):
-        # Regression for the payment-mock feature: cancel_reservation_with_
-        # stock() is unmodified and has no opinion on payment_method/
-        # payment_status, so cancelling a reservation created through the
-        # mock payment flow must still work exactly as before, and the
-        # payment fields it carried in must come back unchanged.
+        # PM review m2: cancelling a pending reservation whose mock payment
+        # already succeeded (payment_status="paid") must, in the same
+        # RPC/transaction as the status change and stock return, also move
+        # payment_status to "cancelled" -- a cancelled reservation should
+        # never keep showing "paid".
         reservation = make_reservation(payment_method="credit_card", payment_status="paid")
         fake_supabase.reservations[reservation["id"]] = reservation
+        stock_before = fake_supabase.items[reservation["item_id"]]["stock"]
 
         response = cancel(client, reservation["id"], reservation["access_token"])
 
@@ -158,7 +166,25 @@ class TestCancelReservation:
         body = response.json()
         assert body["status"] == "cancelled"
         assert body["payment_method"] == "credit_card"
-        assert body["payment_status"] == "paid"
+        assert body["payment_status"] == "cancelled"
+        assert fake_supabase.items[reservation["item_id"]]["stock"] == stock_before + 1
+
+    def test_cancelling_a_reservation_with_pending_payment_leaves_it_pending(
+        self, client, fake_supabase
+    ):
+        # A reservation whose payment_status is still "pending" (e.g. it
+        # predates the payment feature) has no successful mock payment to
+        # cancel, so payment_status must stay "pending" -- only "paid"
+        # transitions to "cancelled".
+        reservation = make_reservation(payment_method=None, payment_status="pending")
+        fake_supabase.reservations[reservation["id"]] = reservation
+
+        response = cancel(client, reservation["id"], reservation["access_token"])
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "cancelled"
+        assert body["payment_status"] == "pending"
 
     def test_cancelling_returns_one_unit_of_stock(self, client, fake_supabase):
         reservation = make_reservation(item_id="11111111-1111-4111-8111-111111111111")
@@ -204,6 +230,12 @@ class TestCancelReservation:
         assert first.status_code == 200
         assert second.status_code == 409
         assert fake_supabase.items[reservation["item_id"]]["stock"] == stock_before + 1
+        # PM review m2: the payment_status "paid" -> "cancelled" change is
+        # part of the same guarded UPDATE as the stock return, so it must
+        # not be re-applied (or re-observed as a change) on the rejected
+        # second call either.
+        assert first.json()["payment_status"] == "cancelled"
+        assert fake_supabase.reservations[reservation["id"]]["payment_status"] == "cancelled"
 
     def test_unknown_reservation_returns_404(self, client, fake_supabase):
         response = cancel(client, str(uuid4()), str(uuid4()))

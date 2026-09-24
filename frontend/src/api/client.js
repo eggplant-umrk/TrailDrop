@@ -205,6 +205,11 @@ export async function cancelReservation(reservationId, reservationToken) {
         throw err;
       }
       res.status = "cancelled";
+      // 本番のcancel_reservation_with_stock RPCと同じく、payment_statusが
+      // "paid"の場合だけ"cancelled"にする("pending"はそのまま)。
+      if (res.payment_status === "paid") {
+        res.payment_status = "cancelled";
+      }
       map[reservationId] = res;
       sessionStorage.setItem("demo_reservations", JSON.stringify(map));
       const { access_token: _accessToken, ...response } = res;

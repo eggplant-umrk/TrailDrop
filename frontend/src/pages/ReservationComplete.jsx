@@ -284,7 +284,10 @@ export default function ReservationComplete() {
         )}
         {reservation.payment_method && (
           <div className="mb-3">
-            支払い方法: {PAYMENT_METHOD_LABELS[reservation.payment_method] || reservation.payment_method}
+            <div>
+              支払い方法: {PAYMENT_METHOD_LABELS[reservation.payment_method] || reservation.payment_method}
+            </div>
+            <div className="text-xs text-gray-500">デモ決済（実際の請求はありません）</div>
           </div>
         )}
         {/* QRは受取前(pending)のみ表示する。受取済み・状態不明の予約でQRを

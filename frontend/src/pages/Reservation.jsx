@@ -13,6 +13,18 @@ const PAYMENT_METHODS = [
   { value: "credit_card", label: "クレジットカード" },
 ];
 
+// POST /reservationsがこれらのstatusで失敗した場合、main.pyのcreate_
+// reservation_with_stock RPCは例外を送出しており(=そのRPC呼び出し内で
+// 行った全ての書き込みがPostgresのトランザクションとしてロールバック
+// される)、予約が作成されていないと確実に言える。それ以外の失敗
+// (ネットワーク断、5xx、応答のJSON解析失敗などでerr.statusが無い/
+// 想定外の値)は、リクエストがサーバーに届いた後で応答だけが失われた
+// 可能性を否定できないため、専用の警告文言にする(Idempotency-Keyは
+// 今回実装しないため、Frontend側で「確実に失敗した」と言い切れない)。
+const DEFINITELY_NOT_CREATED_STATUSES = new Set([400, 404, 409, 422]);
+const AMBIGUOUS_CREATION_FAILURE_MESSAGE =
+  "予約の結果を確認できませんでした。予約が作成されている可能性があります。再試行する前に予約状況をご確認ください。";
+
 export default function Reservation() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -142,7 +154,9 @@ export default function Reservation() {
       // エラー時もconfirming(支払い確認画面)は維持し、name/date/
       // paymentMethodのstateも一切触らない。入力し直さずそのまま
       // 「支払いを確定する」を再度押せば再試行できる。
-      const msg = e.message || "予約に失敗しました";
+      const msg = DEFINITELY_NOT_CREATED_STATUSES.has(e?.status)
+        ? e.message || "予約に失敗しました"
+        : AMBIGUOUS_CREATION_FAILURE_MESSAGE;
       setFormError(msg);
     } finally {
       setSubmitting(false);
@@ -189,6 +203,9 @@ export default function Reservation() {
                 </label>
               ))}
             </div>
+            <p className="mt-1 text-xs text-gray-500">
+              ※これはデモ用のモック決済です。実際の支払いは発生しません。
+            </p>
           </fieldset>
 
           {formError && <div className="text-red-600">{formError}</div>}

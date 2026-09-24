@@ -220,6 +220,11 @@ to service_role;
 -- concurrent cancel calls for the same reservation cannot both observe
 -- 'pending' and both return stock: the second call blocks until the first
 -- commits, then sees the already-cancelled status and is rejected.
+--
+-- The same UPDATE also moves payment_status from 'paid' to 'cancelled'
+-- (leaving 'pending' payment_status alone) -- one statement, one
+-- transaction, so cancellation and the payment_status change can't happen
+-- separately or only one of the two.
 create or replace function public.cancel_reservation_with_stock(
     p_reservation_id uuid,
     p_access_token uuid
@@ -247,8 +252,11 @@ begin
         raise exception 'RESERVATION_NOT_CANCELLABLE' using errcode = 'P0004';
     end if;
 
+    -- payment_statusが'paid'(モック決済成功済み)なら'cancelled'にする。
+    -- 'pending'(支払い機能追加以前の既存予約など)はそのまま変更しない。
     update public.reservations
-    set status = 'cancelled'
+    set status = 'cancelled',
+        payment_status = case when payment_status = 'paid' then 'cancelled' else payment_status end
     where id = p_reservation_id
       and access_token = p_access_token
       and status = 'pending'
