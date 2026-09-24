@@ -64,6 +64,14 @@ class QRVerifyResponse(ReservationResponse):
     pass
 
 
+# スタッフ向け予約確認(GET /staff/reservations/{id})専用のレスポンス。
+# ReservationResponseにaccess_tokenは元々含まれていない(意図的)ため、その
+# 保証をそのまま引き継ぐ。item_titleだけを追加する(スタッフ画面で商品名を
+# 表示するため。Backend側でitemsテーブルから引いて埋める)。
+class StaffReservationResponse(ReservationResponse):
+    item_title: str | None = None
+
+
 class QRVerifyRequest(BaseModel):
     qr_token: UUID
 
