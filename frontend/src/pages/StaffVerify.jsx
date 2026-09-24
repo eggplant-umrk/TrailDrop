@@ -13,6 +13,19 @@ function formatJapanDateTime(value) {
   }).format(new Date(value));
 }
 
+// 予約確認結果の取得時刻用(例: 2026/09/24 15:00)。
+function formatFetchedAt(value) {
+  return new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).format(value);
+}
+
 // Reservation.jsxのPAYMENT_METHODSと合わせる。
 const PAYMENT_METHOD_LABELS = {
   paypay: "PayPay",
@@ -21,8 +34,11 @@ const PAYMENT_METHOD_LABELS = {
 
 // Backend/DBのpayment_statusは'pending'/'paid'/'cancelled'(予約自体の
 // status pending/completed/cancelledとは別の値域)。
+// 'pending'は支払い機能(PR #14)追加以前の既存予約に入るデフォルト値で、
+// 実際の支払い状況は不明。「未払い」と表示すると支払いを求める誤解を
+// 招くため、支払い情報が無いことをそのまま表示する。
 const PAYMENT_STATUS_LABELS = {
-  pending: "未払い",
+  pending: "支払い情報なし（機能追加前の予約）",
   paid: "支払い済み",
   cancelled: "キャンセル済み",
 };
@@ -98,6 +114,10 @@ export default function StaffVerify() {
   const [lookupLoading, setLookupLoading] = useState(false);
   const [lookupError, setLookupError] = useState(null);
   const [lookupResult, setLookupResult] = useState(null);
+  // 予約確認結果はその時点のスナップショットで、後から受取確認などで状態が
+  // 変わっても自動では更新されない。スタッフが古い「受け渡し可能」を
+  // 信じ続けないよう、取得した時刻(ブラウザの現在時刻)を併せて表示する。
+  const [lookupFetchedAt, setLookupFetchedAt] = useState(null);
 
   async function handleSubmit(event) {
     event.preventDefault();
@@ -146,10 +166,12 @@ export default function StaffVerify() {
     setLookupLoading(true);
     setLookupError(null);
     setLookupResult(null);
+    setLookupFetchedAt(null);
 
     try {
       const response = await api.getStaffReservation(reservationId.trim(), staffToken);
       setLookupResult(response);
+      setLookupFetchedAt(new Date());
     } catch (requestError) {
       setLookupError({
         status: requestError.status,
@@ -290,6 +312,12 @@ export default function StaffVerify() {
             <div className={`mb-3 rounded p-3 ${lookupStatusDisplay.className}`}>
               <span className="font-semibold">{lookupStatusDisplay.label}</span>
             </div>
+            {lookupFetchedAt && (
+              <p className="mb-3 text-xs text-gray-500">
+                確認日時：{formatFetchedAt(lookupFetchedAt)}
+                （この時点の状態です。受け渡し直前に再確認してください）
+              </p>
+            )}
             <dl className="space-y-3">
               <div>
                 <dt className="text-sm text-gray-600">商品</dt>

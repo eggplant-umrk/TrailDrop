@@ -432,8 +432,8 @@ def get_staff_reservation(
 
         # 商品名の取得に失敗しても予約情報自体の表示は妨げない
         # (ReservationComplete.jsx/StaffVerify.jsxの既存の商品名解決と同じ
-        # フォールバック方針)。access_tokenはReservationResponseに元々
-        # 含まれていないため、ここでも(reservationが実際は持っていても)
+        # フォールバック方針)。access_token・qr_tokenはStaffReservationResponse
+        # に定義していないため、reservationが実際は持っていても
         # response_modelによって自動的に除外される。
         item_title = None
         try:

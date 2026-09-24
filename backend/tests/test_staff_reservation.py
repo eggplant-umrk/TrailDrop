@@ -55,12 +55,35 @@ class FakeTable:
         return FakeQueryResult([deepcopy(r) for r in matches])
 
 
+RAW_ERROR_MESSAGE = "raw postgrest failure: connection reset (secret detail)"
+
+
+class FailingTable:
+    """Table whose query raises on execute(), to simulate a DB/network error."""
+
+    def select(self, _fields):
+        return self
+
+    def eq(self, _field, _value):
+        return self
+
+    def limit(self, _n):
+        return self
+
+    def execute(self):
+        raise RuntimeError(RAW_ERROR_MESSAGE)
+
+
 class FakeSupabase:
     def __init__(self, reservations, items):
         self.reservations = reservations
         self.items = items
+        # Set by a test to make queries on these tables raise.
+        self.failing_tables = set()
 
     def table(self, name):
+        if name in self.failing_tables:
+            return FailingTable()
         if name == "reservations":
             return FakeTable(self.reservations)
         if name == "items":
@@ -162,6 +185,34 @@ class TestGetStaffReservation:
 
         assert "access_token" not in response.json()
 
+    def test_qr_token_and_access_token_are_never_returned(self, client, fake_supabase):
+        # PM review MAJOR: qr_token is the secret that completes a pickup via
+        # /qr/verify, so this read-only lookup must never expose it (nor the
+        # customer-facing access_token). The only keys returned are the
+        # explicit StaffReservationResponse fields.
+        reservation = make_reservation()
+        fake_supabase.reservations[reservation["id"]] = reservation
+
+        response = lookup(client, reservation["id"])
+
+        assert response.status_code == 200
+        body = response.json()
+        assert "qr_token" not in body
+        assert "access_token" not in body
+        assert reservation["qr_token"] not in response.text
+        assert reservation["access_token"] not in response.text
+        assert set(body) == {
+            "id",
+            "item_id",
+            "item_title",
+            "user_name",
+            "status",
+            "requested_at",
+            "reserved_at",
+            "payment_method",
+            "payment_status",
+        }
+
     def test_unknown_reservation_returns_404(self, client, fake_supabase):
         response = lookup(client, str(uuid4()))
 
@@ -224,3 +275,39 @@ class TestGetStaffReservation:
 
         assert response.status_code == 200
         assert response.json()["item_title"] is None
+
+    def test_items_query_exception_does_not_fail_the_lookup(self, client, fake_supabase):
+        # PM review m3: an exception from the items query (not just a missing
+        # row) must still return the reservation with item_title=None, and
+        # must not leak the raw exception into the response.
+        reservation = make_reservation()
+        fake_supabase.reservations[reservation["id"]] = reservation
+        fake_supabase.failing_tables = {"items"}
+
+        response = lookup(client, reservation["id"])
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["id"] == reservation["id"]
+        assert body["status"] == "pending"
+        assert body["user_name"] == "テスト太郎"
+        assert body["item_title"] is None
+        assert RAW_ERROR_MESSAGE not in response.text
+        assert "qr_token" not in body
+        assert "access_token" not in body
+
+    def test_reservations_query_exception_returns_502_without_leaking(
+        self, client, fake_supabase
+    ):
+        # PM review m3: an exception from the reservations query follows the
+        # existing policy (502 "Failed to fetch reservation") without leaking
+        # the raw exception message.
+        reservation = make_reservation()
+        fake_supabase.reservations[reservation["id"]] = reservation
+        fake_supabase.failing_tables = {"reservations"}
+
+        response = lookup(client, reservation["id"])
+
+        assert response.status_code == 502
+        assert response.json() == {"detail": "Failed to fetch reservation"}
+        assert RAW_ERROR_MESSAGE not in response.text

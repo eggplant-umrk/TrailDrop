@@ -302,8 +302,8 @@ export async function verifyQr(qrToken, staffToken) {
 }
 
 // スタッフ用の予約確認(読み取り専用)。X-Reservation-Tokenは使わず、
-// X-Staff-Tokenのみで認可する。access_tokenはBackend/DEMO_MODEどちらの
-// 応答にも含めない。
+// X-Staff-Tokenのみで認可する。access_token・qr_tokenはBackend/DEMO_MODE
+// どちらの応答にも含めない。
 export async function getStaffReservation(reservationId, staffToken) {
   if (DEMO_MODE) {
     // Demo mode: verifyQr()と同じく、STAFF_API_TOKENの実体が無いので
@@ -324,8 +324,19 @@ export async function getStaffReservation(reservationId, staffToken) {
       }
       const items = await getItems();
       const found = (items || []).find((it) => String(it.id) === String(entry.item_id));
-      const { access_token: _accessToken, ...response } = entry;
-      return { ...response, item_title: found?.title || null };
+      // 本番のStaffReservationResponseと同じ項目だけを返す。access_tokenと
+      // qr_token(受取完了に使う秘密情報)は絶対に含めない。
+      return {
+        id: entry.id,
+        item_id: entry.item_id,
+        item_title: found?.title || null,
+        user_name: entry.user_name,
+        status: entry.status,
+        requested_at: entry.requested_at ?? null,
+        reserved_at: entry.reserved_at ?? null,
+        payment_method: entry.payment_method ?? null,
+        payment_status: entry.payment_status ?? null,
+      };
     } catch (e) {
       if (e && typeof e.status === "number") throw e;
       const err = new Error("Failed to fetch reservation");
