@@ -37,7 +37,17 @@ const DRAFT_KEY_PREFIX = "traildrop_reserve_draft_";
 function loadDraft(id) {
   try {
     const raw = sessionStorage.getItem(DRAFT_KEY_PREFIX + id);
-    return raw ? JSON.parse(raw) : null;
+    if (!raw) return null;
+    const draft = JSON.parse(raw);
+    // 保存された希望日時が既に過去になっている場合は復元しない(そのまま
+    // 送信すると422になるため)。氏名・支払い方法はそのまま復元する。
+    if (draft?.date) {
+      const draftDateTime = new Date(`${draft.date}:00+09:00`);
+      if (Number.isNaN(draftDateTime.getTime()) || draftDateTime.getTime() < Date.now()) {
+        return { ...draft, date: "" };
+      }
+    }
+    return draft;
   } catch {
     return null;
   }
@@ -80,9 +90,9 @@ export default function Reservation() {
   // 戻れるようにする(以前はコンポーネント内stateだけで切り替えており、
   // 戻る操作がこのステップを経由せず一覧まで戻ってしまっていた)。
   const isConfirmStep = location.pathname.endsWith("/confirm");
-  // 確認画面への遷移時にlocation.stateへ入力内容を積むが、リロードで
-  // location.stateは失われるため、sessionStorageのdraftをフォールバックに
-  // 使う(戻った際の入力内容復元にも同じdraftを使う)。
+  // 確認画面への遷移時はlocation.stateに入力内容を積むが、入力画面へ
+  // 戻った時に表示する値はsessionStorageのdraftから復元する(location.state
+  // はページ遷移のたびに変わり、戻る操作用の値としては使えないため)。
   const [name, setName] = useState(() => location.state?.name ?? loadDraft(id)?.name ?? "");
   const [date, setDate] = useState(() => location.state?.date ?? loadDraft(id)?.date ?? "");
   const [paymentMethod, setPaymentMethod] = useState(
@@ -135,6 +145,13 @@ export default function Reservation() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [item, isConfirmStep]);
 
+  // 確認画面⇔入力画面を行き来した際、前のステップで出ていたエラー表示を
+  // 持ち越さない(入力内容・draftの復元とは無関係にリセットする)。
+  useEffect(() => {
+    setFormError(null);
+    setAmbiguousFailure(false);
+  }, [isConfirmStep]);
+
   if (loading) return <div className="p-4">読み込み中…</div>;
   if (error) return <div className="p-4 text-red-600">{error}</div>;
   if (!item) return <div className="p-4">指定された商品が見つかりません。</div>;
@@ -156,7 +173,14 @@ export default function Reservation() {
     setFormError(null);
     saveDraft(id, { name, date, paymentMethod });
     navigate(`/reserve/${id}/confirm`, {
-      state: { name, date, paymentMethod, routeOrigin, routeDestination, routePassPoint },
+      state: {
+        name,
+        date,
+        paymentMethod,
+        origin: routeOrigin,
+        destination: routeDestination,
+        passPoint: routePassPoint,
+      },
     });
   }
 
@@ -329,7 +353,15 @@ export default function Reservation() {
           <div className="flex gap-2">
             <button
               type="button"
-              onClick={() => navigate(-1)}
+              onClick={() =>
+                navigate(`/reserve/${id}`, {
+                  state: {
+                    origin: routeOrigin,
+                    destination: routeDestination,
+                    passPoint: routePassPoint,
+                  },
+                })
+              }
               disabled={submitting}
               className="flex-1 px-4 py-2 bg-gray-200 rounded disabled:opacity-50"
             >
