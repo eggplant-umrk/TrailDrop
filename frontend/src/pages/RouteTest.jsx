@@ -44,16 +44,29 @@ function parseTimeStringToMinutes(value) {
   return Number(match[1]) * 60 + Number(match[2]);
 }
 
-// 商品の受取可能時間(pickup_available_from/to)とユーザーの受取枠が重なるか判定する。
-// 受取可能時間が未設定(null)の商品は「常に受け取れる」とは解釈せず、対象外とする。
-// 境界が接する場合(例: 受取枠が18:00開始で、商品の受取終了が18:00)も重なりとして扱う。
-function isItemAvailableInWindow(item, windowStartMinutes, windowEndMinutes) {
+// "HH:MM:SS" / "HH:MM" から表示用の"HH:MM"を取り出す。time型には日付・
+// timezoneの概念が無いため、Dateへの変換は行わず文字列のまま扱う
+// (parseTimeStringToMinutesと同じ抽出方法)。
+function formatPickupHours(value) {
+  if (typeof value !== "string") return null;
+  const match = value.match(/^(\d{2}):(\d{2})/);
+  return match ? `${match[1]}:${match[2]}` : null;
+}
+
+// 商品の受取可能時間(pickup_available_from/to)に、実効受取予定時刻
+// (pass_at + windowOffsetMinutes、以前は2時間幅の受取枠全体との重なりで
+// 判定していたが、枠の端だけが営業時間に触れていて実際の通過時刻は営業時間外、
+// というケースを誤って「受け取れる」としてしまっていたため、一点判定に変更)
+// が収まっているかどうかを判定する。受取可能時間が未設定(null)の商品は
+// 「常に受け取れる」とは解釈せず、対象外とする。境界(ちょうど開店・閉店時刻)
+// は利用可として扱う。
+function isItemAvailableAt(item, effectiveMinutes) {
   const itemStart = parseTimeStringToMinutes(item.pickup_available_from);
   const itemEnd = parseTimeStringToMinutes(item.pickup_available_to);
   if (itemStart === null || itemEnd === null) {
     return false;
   }
-  return windowStartMinutes <= itemEnd && itemStart <= windowEndMinutes;
+  return itemStart <= effectiveMinutes && effectiveMinutes <= itemEnd;
 }
 
 const WINDOW_DURATION_MINUTES = 120;
@@ -138,16 +151,20 @@ export default function RouteTest() {
       )
     : null;
 
-  const timeFilteredItems =
-    windowStartDate && windowEndDate
-      ? matchedItems.filter((item) =>
-          isItemAvailableInWindow(
-            item,
-            jstMinutesSinceMidnight(windowStartDate),
-            jstMinutesSinceMidnight(windowEndDate),
-          ),
-        )
-      : [];
+  // 実効受取予定時刻(windowOffsetMinutesだけ通過予定時刻をずらした、実際に
+  // 受取枠の中心となる瞬間)。表示・予約への引き継ぎに使う2時間幅の受取枠
+  // (windowStartDate/windowEndDate)とは別に、商品の営業時間内判定だけは
+  // この一点で行う(枠の端だけが営業時間に触れていても、実際に受け取る
+  // つもりの時刻が営業時間外なら不適切なため)。
+  const effectiveDate = passAtDate
+    ? new Date(passAtDate.getTime() + windowOffsetMinutes * 60000)
+    : null;
+
+  const timeFilteredItems = effectiveDate
+    ? matchedItems.filter((item) =>
+        isItemAvailableAt(item, jstMinutesSinceMidnight(effectiveDate)),
+      )
+    : [];
 
   return (
     <main className="min-h-screen bg-[#f7fbf6] px-4 py-8 text-[#16381b]">
@@ -301,6 +318,16 @@ export default function RouteTest() {
                         </div>
                         <div className="text-sm text-gray-600">{item.location_name}</div>
                         <div className="text-sm mt-1">¥{item.price}（残り{item.stock}）</div>
+                        {/* ユーザーが選択した「受取時間」(上のセクション)とは別物と
+                            分かるよう、商品自体の営業時間であることを明示するラベル
+                            にする。片方でも未設定なら表示しない(既存のNULL扱いと
+                            同じ)。 */}
+                        {item.pickup_available_from && item.pickup_available_to && (
+                          <div className="text-xs text-gray-500 mt-1">
+                            商品受取可能時間: {formatPickupHours(item.pickup_available_from)}
+                            〜{formatPickupHours(item.pickup_available_to)}
+                          </div>
+                        )}
                       </div>
                       <Link
                         to={`/reserve/${item.id}`}
