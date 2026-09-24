@@ -175,12 +175,12 @@ export default function StaffVerify() {
     setScanning(true);
   }
 
-  // 読み取り成功時: QRトークン欄へ値をセットし、そのまま受取確認へ進む。
-  // QrScannerは1回読み取った時点でカメラを止めるため、同じQRを映し続けても
-  // ここは1度しか呼ばれない。
+  // 読み取り成功時: 手入力欄にはセットせず、そのまま受取確認へ進む。
+  // 404/409/通信エラーなどでverifyが失敗してもQRトークンを画面に残さない
+  // ため。QrScannerは1回読み取った時点でカメラを止めるため、同じQRを
+  // 映し続けてもここは1度しか呼ばれない。
   function handleScanDetected(value) {
     setScanning(false);
-    setQrToken(value);
     verify(value);
   }
 

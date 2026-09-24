@@ -1,11 +1,16 @@
 import { useEffect, useRef, useState } from "react";
+import { isUuid } from "../utils/uuid";
 
 // スタッフ画面用のQRコードカメラ読み取り。
 // - 読み取りはブラウザ標準のBarcodeDetector(Android Chromeなど)を優先し、
 //   未対応ブラウザ(iOS Safariなど)ではjsQRで解析する。jsQRはスキャン開始時
 //   にだけ動的importし、通常の画面表示時のバンドルには含めない。
+// - BarcodeDetectorが存在しても実際のdetect()が実行時に失敗する環境が
+//   あるため、その場合は同じカメラストリームを維持したままjsQRへ切り替える
+//   (一度切り替えたらBarcodeDetectorには戻さない)。
 // - 1回読み取ったら即座に解析とカメラを止め、onDetectedを1度だけ呼ぶ
-//   (同じQRを映し続けても複数回通知しない)。
+//   (同じQRを映し続けても複数回通知しない)。読み取った値がUUID形式
+//   (TrailDropのqr_token)でない場合は無視してスキャンを継続する。
 // - 読み取った値はログ・画面に出さない(呼び出し側へ渡すだけ)。
 
 const SCAN_INTERVAL_MS = 200;
@@ -29,22 +34,7 @@ function describeCameraError(cameraError) {
   }
 }
 
-async function createDetector() {
-  if (typeof window !== "undefined" && "BarcodeDetector" in window) {
-    try {
-      const formats = await window.BarcodeDetector.getSupportedFormats();
-      if (formats.includes("qr_code")) {
-        const detector = new window.BarcodeDetector({ formats: ["qr_code"] });
-        return async (video) => {
-          const codes = await detector.detect(video);
-          return codes[0]?.rawValue || null;
-        };
-      }
-    } catch {
-      // BarcodeDetectorが使えない場合はjsQRへフォールバックする。
-    }
-  }
-
+async function createJsQrDetector() {
   const { default: jsQR } = await import("jsqr");
   const canvas = document.createElement("canvas");
   const context = canvas.getContext("2d", { willReadFrequently: true });
@@ -63,10 +53,50 @@ async function createDetector() {
   };
 }
 
+async function createDetector() {
+  if (typeof window !== "undefined" && "BarcodeDetector" in window) {
+    try {
+      const formats = await window.BarcodeDetector.getSupportedFormats();
+      if (formats.includes("qr_code")) {
+        const detector = new window.BarcodeDetector({ formats: ["qr_code"] });
+        // null: BarcodeDetectorを使用中。function: jsQRへ切替済み。
+        // "failed": jsQRへの切替自体にも失敗した(致命的エラーとして扱う)。
+        let fallback = null;
+        return async (video) => {
+          if (!fallback) {
+            try {
+              const codes = await detector.detect(video);
+              return codes[0]?.rawValue || null;
+            } catch {
+              // detect()が実行時に失敗する環境ではjsQRへ切り替える。
+              // カメラストリームはそのまま維持し、以降はjsQRのみを使う。
+              try {
+                fallback = await createJsQrDetector();
+              } catch {
+                fallback = "failed";
+              }
+            }
+          }
+          if (fallback === "failed") {
+            throw new Error("QRコードの読み取りに失敗しました。");
+          }
+          return fallback(video);
+        };
+      }
+    } catch {
+      // BarcodeDetectorが使えない場合はjsQRへフォールバックする。
+    }
+  }
+
+  return createJsQrDetector();
+}
+
 export default function QrScanner({ onDetected, onCancel }) {
   const videoRef = useRef(null);
   const [status, setStatus] = useState("starting"); // starting | scanning | error
   const [errorMessage, setErrorMessage] = useState("");
+  // UUID形式でない値を読み取った際に一時的に表示する案内。
+  const [invalidHint, setInvalidHint] = useState(false);
   // 親の再レンダーでonDetectedが差し替わってもカメラを再起動しないよう、
   // 最新のコールバックはrefで参照する。
   const onDetectedRef = useRef(onDetected);
@@ -76,10 +106,12 @@ export default function QrScanner({ onDetected, onCancel }) {
     let stopped = false;
     let stream = null;
     let timerId = null;
+    let invalidHintTimerId = null;
 
     function stopCamera() {
       stopped = true;
       if (timerId) clearTimeout(timerId);
+      if (invalidHintTimerId) clearTimeout(invalidHintTimerId);
       if (stream) {
         stream.getTracks().forEach((track) => track.stop());
         stream = null;
@@ -128,14 +160,28 @@ export default function QrScanner({ onDetected, onCancel }) {
               value = await detect(video);
             }
           } catch {
-            value = null;
+            // BarcodeDetector→jsQRへのフォールバック自体が失敗した場合など、
+            // 読み取りを継続できない致命的なエラー。手入力の案内へつなげる。
+            stopCamera();
+            setErrorMessage("カメラ読み取りに失敗しました。");
+            setStatus("error");
+            return;
           }
           if (stopped) return;
           const trimmed = typeof value === "string" ? value.trim() : "";
           if (trimmed) {
-            stopCamera();
-            onDetectedRef.current(trimmed);
-            return;
+            if (isUuid(trimmed)) {
+              stopCamera();
+              onDetectedRef.current(trimmed);
+              return;
+            }
+            // TrailDropのQRコード(UUID形式)ではない値はBackendへ送らず、
+            // 一時的な案内を出してスキャンを続ける。
+            setInvalidHint(true);
+            if (invalidHintTimerId) clearTimeout(invalidHintTimerId);
+            invalidHintTimerId = setTimeout(() => {
+              if (!stopped) setInvalidHint(false);
+            }, 1500);
           }
           timerId = setTimeout(tick, SCAN_INTERVAL_MS);
         };
@@ -177,7 +223,11 @@ export default function QrScanner({ onDetected, onCancel }) {
             />
           </div>
           <p className="text-center text-sm font-medium" aria-live="polite">
-            {status === "starting" ? "カメラを起動しています…" : "QRコードを枠内に合わせてください"}
+            {status === "starting"
+              ? "カメラを起動しています…"
+              : invalidHint
+                ? "TrailDropのQRコードではありません"
+                : "QRコードを枠内に合わせてください"}
           </p>
         </>
       )}
