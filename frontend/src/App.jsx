@@ -11,6 +11,7 @@ function App() {
       <Routes>
         <Route path="/" element={<ItemList />} />
         <Route path="/reserve/:id" element={<Reservation />} />
+        <Route path="/reserve/:id/confirm" element={<Reservation />} />
         <Route path="/complete/:id" element={<ReservationComplete />} />
         <Route path="/route-test" element={<RouteTest />} />
         <Route path="/staff/verify" element={<StaffVerify />} />
