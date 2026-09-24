@@ -103,6 +103,8 @@ class FakeSupabase:
             "reserved_at": "2026-09-24T00:00:00+00:00",
             "payment_method": payment_method,
             "payment_status": "paid",
+            "pickup_window_start": params.get("p_pickup_window_start"),
+            "pickup_window_end": params.get("p_pickup_window_end"),
         }
         self.reservations[reservation_id] = reservation
         return FakeRpcResult([deepcopy(reservation)])
@@ -244,3 +246,141 @@ class TestCreateReservationPayment:
         assert body["payment_method"] == "credit_card"
         assert body["payment_status"] == "paid"
         assert body["requested_at"] is not None
+
+
+class TestCreateReservationPickupWindow:
+    """PR #19: RouteTestで選択した受取時間帯(pickup_window_start/end)を
+    予約作成時に受け取り、保存・返却できることを確認する。requested_at
+    (experience種別専用の単一時刻)とは独立した別フィールドであること、
+    未指定でも既存の予約作成フローを壊さないこと(後方互換)の両方を検証する。
+    """
+
+    def test_pickup_window_is_saved_and_returned(self, client, fake_supabase):
+        start = future_iso(days=1)
+        end = future_iso(days=1)  # window自体の妥当性(start<end)はFrontend側の関心事
+
+        response = create(
+            client,
+            payment_method="paypay",
+            pickup_window_start=start,
+            pickup_window_end=end,
+        )
+
+        assert response.status_code == 201
+        body = response.json()
+        assert body["pickup_window_start"] is not None
+        assert body["pickup_window_end"] is not None
+
+    def test_pickup_window_defaults_to_null_when_not_provided(self, client, fake_supabase):
+        # 後方互換: RouteTestを経由しない既存の予約作成フローは、pickup
+        # windowを一切送らない。この場合でも従来どおり201で成功し、両方
+        # nullで返る(既存予約と同じ扱い)。
+        response = create(client, payment_method="paypay")
+
+        assert response.status_code == 201
+        body = response.json()
+        assert body["pickup_window_start"] is None
+        assert body["pickup_window_end"] is None
+
+    def test_pickup_window_available_for_experience_type_too(self, client, fake_supabase):
+        # pickup_window_start/endはrequested_atと独立した概念であり、
+        # experience種別(requested_at必須)でも同時に保持できる。
+        fake_supabase.items["22222222-2222-4222-8222-222222222222"] = make_item(
+            type="experience"
+        )
+
+        response = create(
+            client,
+            item_id="22222222-2222-4222-8222-222222222222",
+            payment_method="paypay",
+            requested_at=future_iso(),
+            pickup_window_start=future_iso(days=1),
+            pickup_window_end=future_iso(days=1),
+        )
+
+        assert response.status_code == 201
+        body = response.json()
+        assert body["requested_at"] is not None
+        assert body["pickup_window_start"] is not None
+        assert body["pickup_window_end"] is not None
+
+
+class TestCreateReservationPickupWindowOrdering:
+    """PR #19フォローアップ(PMレビュー): pickup_window_start/endの整合性を
+    Backend(models.py)で検証する。両方null(既存互換)・両方指定でstart<end
+    のみを受理し、片方だけの指定やstart>=endは422で拒否する。RPCへ到達する
+    前にPydanticのmodel_validatorで弾くため、これらのケースではFakeSupabase
+    のrpc()が一切呼ばれない(rpc_call_count == 0)ことも合わせて確認する。
+    """
+
+    def test_start_before_end_succeeds(self, client, fake_supabase):
+        start = future_iso(days=1)
+        end = (datetime.now(timezone.utc) + timedelta(days=1, hours=2)).isoformat()
+
+        response = create(
+            client,
+            payment_method="paypay",
+            pickup_window_start=start,
+            pickup_window_end=end,
+        )
+
+        assert response.status_code == 201
+        body = response.json()
+        assert body["pickup_window_start"] is not None
+        assert body["pickup_window_end"] is not None
+
+    def test_start_equal_to_end_is_rejected(self, client, fake_supabase):
+        same = future_iso(days=1)
+
+        response = create(
+            client,
+            payment_method="paypay",
+            pickup_window_start=same,
+            pickup_window_end=same,
+        )
+
+        assert response.status_code == 422
+        assert fake_supabase.rpc_call_count == 0
+
+    def test_start_after_end_is_rejected(self, client, fake_supabase):
+        start = (datetime.now(timezone.utc) + timedelta(days=1, hours=2)).isoformat()
+        end = future_iso(days=1)  # 1日後(startより前)
+
+        response = create(
+            client,
+            payment_method="paypay",
+            pickup_window_start=start,
+            pickup_window_end=end,
+        )
+
+        assert response.status_code == 422
+        assert fake_supabase.rpc_call_count == 0
+
+    def test_start_only_is_rejected(self, client, fake_supabase):
+        response = create(
+            client,
+            payment_method="paypay",
+            pickup_window_start=future_iso(days=1),
+        )
+
+        assert response.status_code == 422
+        assert fake_supabase.rpc_call_count == 0
+
+    def test_end_only_is_rejected(self, client, fake_supabase):
+        response = create(
+            client,
+            payment_method="paypay",
+            pickup_window_end=future_iso(days=1),
+        )
+
+        assert response.status_code == 422
+        assert fake_supabase.rpc_call_count == 0
+
+    def test_both_null_succeeds_for_backward_compatibility(self, client, fake_supabase):
+        # 既存予約作成フロー(RouteTestを経由しない)は両方省略する。
+        response = create(client, payment_method="paypay")
+
+        assert response.status_code == 201
+        body = response.json()
+        assert body["pickup_window_start"] is None
+        assert body["pickup_window_end"] is None

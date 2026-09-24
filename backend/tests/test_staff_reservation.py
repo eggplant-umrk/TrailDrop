@@ -103,6 +103,8 @@ def make_reservation(**overrides):
         "reserved_at": "2026-09-24T00:00:00+00:00",
         "payment_method": "paypay",
         "payment_status": "paid",
+        "pickup_window_start": None,
+        "pickup_window_end": None,
     }
     data.update(overrides)
     return data
@@ -177,6 +179,33 @@ class TestGetStaffReservation:
         assert body["payment_method"] == "credit_card"
         assert body["payment_status"] == "paid"
 
+    def test_pickup_window_fields_are_returned(self, client, fake_supabase):
+        reservation = make_reservation(
+            pickup_window_start="2026-09-25T01:00:00+00:00",
+            pickup_window_end="2026-09-25T03:00:00+00:00",
+        )
+        fake_supabase.reservations[reservation["id"]] = reservation
+
+        response = lookup(client, reservation["id"])
+
+        body = response.json()
+        assert body["pickup_window_start"] is not None
+        assert body["pickup_window_end"] is not None
+
+    def test_missing_pickup_window_returns_null_not_an_error(self, client, fake_supabase):
+        # 後方互換: この機能追加以前の既存予約はpickup_window_start/endを
+        # 持たない(make_reservation()の既定値どおりNone)。取得しても404/500
+        # にならず、両方nullとして返ること。
+        reservation = make_reservation()
+        fake_supabase.reservations[reservation["id"]] = reservation
+
+        response = lookup(client, reservation["id"])
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["pickup_window_start"] is None
+        assert body["pickup_window_end"] is None
+
     def test_access_token_is_never_returned(self, client, fake_supabase):
         reservation = make_reservation()
         fake_supabase.reservations[reservation["id"]] = reservation
@@ -211,6 +240,8 @@ class TestGetStaffReservation:
             "reserved_at",
             "payment_method",
             "payment_status",
+            "pickup_window_start",
+            "pickup_window_end",
         }
 
     def test_unknown_reservation_returns_404(self, client, fake_supabase):

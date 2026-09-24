@@ -308,6 +308,8 @@ export default function RouteTest() {
                           origin: result.origin,
                           destination: result.destination,
                           passPoint: result.pass_point,
+                          pickupWindowStart: windowStartDate.toISOString(),
+                          pickupWindowEnd: windowEndDate.toISOString(),
                         }}
                         className="shrink-0 rounded px-3 py-2 text-sm font-medium text-white bg-[#2f6f3e]"
                       >

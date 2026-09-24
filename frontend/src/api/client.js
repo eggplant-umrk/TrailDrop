@@ -91,6 +91,10 @@ export async function createReservation({
   user_name,
   requested_at = null,
   payment_method = null,
+  // RouteTestで選択した受取時間帯(ISO文字列)。RouteTestを経由しない予約
+  // では両方nullのまま送る(既存予約との後方互換性)。
+  pickup_window_start = null,
+  pickup_window_end = null,
 }) {
   // 本番Backend(main.pyのcreate_reservation)と同じ「未指定・不正はどちらも
   // 400」という扱いを、DEMO_MODEでも先に行う。実際の決済処理はどちらの
@@ -120,6 +124,8 @@ export async function createReservation({
       // 本番のcreate_reservation_with_stock RPCと同じく、モック決済は
       // 予約作成と同時に即時「成功」扱いにする(中間状態を残さない)。
       payment_status: "paid",
+      pickup_window_start,
+      pickup_window_end,
     };
 
     try {
@@ -136,7 +142,14 @@ export async function createReservation({
   return await request(`/reservations`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ item_id, user_name, requested_at, payment_method }),
+    body: JSON.stringify({
+      item_id,
+      user_name,
+      requested_at,
+      payment_method,
+      pickup_window_start,
+      pickup_window_end,
+    }),
   });
 }
 
@@ -336,6 +349,8 @@ export async function getStaffReservation(reservationId, staffToken) {
         reserved_at: entry.reserved_at ?? null,
         payment_method: entry.payment_method ?? null,
         payment_status: entry.payment_status ?? null,
+        pickup_window_start: entry.pickup_window_start ?? null,
+        pickup_window_end: entry.pickup_window_end ?? null,
       };
     } catch (e) {
       if (e && typeof e.status === "number") throw e;

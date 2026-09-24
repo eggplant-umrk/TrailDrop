@@ -26,6 +26,30 @@ function formatFetchedAt(value) {
   }).format(value);
 }
 
+// RouteTestで選択した受取時間帯の表示用。start/endが両方揃っている場合の
+// み範囲表示し、片方でも欠けていれば「未設定」とする(この機能追加以前の
+// 既存予約・RouteTestを経由しない予約はpickup_window_start/endが両方
+// nullのため、常にこちらになる)。
+function formatPickupWindow(startValue, endValue) {
+  if (!startValue || !endValue) return "未設定";
+  const dateFormatter = new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
+  const timeFormatter = new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
+  return `${dateFormatter.format(new Date(startValue))}〜${timeFormatter.format(new Date(endValue))}`;
+}
+
 // Reservation.jsxのPAYMENT_METHODSと合わせる。
 const PAYMENT_METHOD_LABELS = {
   paypay: "PayPay",
@@ -266,6 +290,12 @@ export default function StaffVerify() {
                   <dd className="font-medium">{formatJapanDateTime(result.requested_at)}</dd>
                 </div>
               )}
+              <div>
+                <dt className="text-sm text-gray-600">受取時間帯</dt>
+                <dd className="font-medium">
+                  {formatPickupWindow(result.pickup_window_start, result.pickup_window_end)}
+                </dd>
+              </div>
             </dl>
           </section>
         )}
@@ -345,6 +375,15 @@ export default function StaffVerify() {
                   {lookupResult.requested_at
                     ? formatJapanDateTime(lookupResult.requested_at)
                     : "指定なし"}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-sm text-gray-600">受取時間帯</dt>
+                <dd className="font-medium">
+                  {formatPickupWindow(
+                    lookupResult.pickup_window_start,
+                    lookupResult.pickup_window_end,
+                  )}
                 </dd>
               </div>
               <div>

@@ -1,7 +1,7 @@
 from datetime import datetime, time, timezone
 from uuid import UUID
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 
 class Item(BaseModel):
@@ -28,6 +28,11 @@ class ReservationCreate(BaseModel):
     user_name: str
     requested_at: datetime | None = None
     payment_method: str | None = None
+    # RouteTestで選択した受取時間帯(2時間固定の枠)。requested_at(experience
+    # 種別専用の単一時刻)とは別概念で、pickup/experienceどちらの種別でも
+    # 設定できる。RouteTestを経由しない予約では両方Noneのまま。
+    pickup_window_start: datetime | None = None
+    pickup_window_end: datetime | None = None
 
     @field_validator("requested_at")
     @classmethod
@@ -37,6 +42,23 @@ class ReservationCreate(BaseModel):
         if value is not None and value <= datetime.now(timezone.utc):
             raise ValueError("requested_at must be in the future")
         return value
+
+    # pickup_window_start/endはRPC(create_reservation_with_stock)側でも
+    # reservations_pickup_window_consistent制約で二重に検証されるが、ここで
+    # 先に弾くことでBackend/DBの往復なしに422で拒否できる(requested_atの
+    # バリデーションと同じ、フィールド単体では表現できないルールのため
+    # model_validatorを使う)。
+    @model_validator(mode="after")
+    def pickup_window_must_be_fully_specified_and_ordered(self):
+        start = self.pickup_window_start
+        end = self.pickup_window_end
+        if (start is None) != (end is None):
+            raise ValueError(
+                "pickup_window_start and pickup_window_end must both be set or both be omitted"
+            )
+        if start is not None and end is not None and start >= end:
+            raise ValueError("pickup_window_start must be before pickup_window_end")
+        return self
 
 
 class ReservationResponse(BaseModel):
@@ -54,6 +76,10 @@ class ReservationResponse(BaseModel):
     # ことを表す。
     payment_method: str | None = None
     payment_status: str | None = None
+    # RouteTestで選択した受取時間帯。両方Noneなら「未設定」(この機能追加
+    # 以前の既存予約、またはRouteTestを経由しない予約)。
+    pickup_window_start: datetime | None = None
+    pickup_window_end: datetime | None = None
 
 
 class ReservationCreateResponse(ReservationResponse):
@@ -79,6 +105,8 @@ class StaffReservationResponse(BaseModel):
     reserved_at: datetime | None = None
     payment_method: str | None = None
     payment_status: str | None = None
+    pickup_window_start: datetime | None = None
+    pickup_window_end: datetime | None = None
 
 
 class QRVerifyRequest(BaseModel):

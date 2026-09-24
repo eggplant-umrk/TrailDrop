@@ -8,6 +8,27 @@ function minimumJapanDateTime() {
   return new Date(oneMinuteFromNowInJapan).toISOString().slice(0, 16);
 }
 
+// RouteTestで選択した受取時間帯の表示用(ReservationComplete.jsx/
+// StaffVerify.jsxの日時表示と同じAsia/Tokyo・h23形式に合わせる)。
+function formatPickupWindow(startValue, endValue) {
+  const dateFormatter = new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
+  const timeFormatter = new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
+  return `${dateFormatter.format(new Date(startValue))}〜${timeFormatter.format(new Date(endValue))}`;
+}
+
 // main.pyのVALID_PAYMENT_METHODSと合わせる。実決済は行わないモック決済。
 const PAYMENT_METHODS = [
   { value: "paypay", label: "PayPay" },
@@ -77,8 +98,15 @@ export default function Reservation() {
   // RouteTestから遷移してきた場合のみ、Google Maps引き継ぎに使う経路情報を
   // 受け取る。ItemListから直接来た場合はundefinedのままで、以降も一切
   // 補完しない(推測でdestinationを作らない)。
-  const { origin: routeOrigin, destination: routeDestination, passPoint: routePassPoint } =
-    location.state || {};
+  const {
+    origin: routeOrigin,
+    destination: routeDestination,
+    passPoint: routePassPoint,
+    // RouteTestで選択した受取時間帯(ISO文字列)。ItemListから直接来た場合は
+    // undefinedのままで、origin等と同じく推測で補わない。
+    pickupWindowStart,
+    pickupWindowEnd,
+  } = location.state || {};
   const [item, setItem] = useState(null);
   const [loading, setLoading] = useState(true);
   // 商品自体の読み込み失敗(致命的、フォームごと表示できない)専用。
@@ -181,6 +209,8 @@ export default function Reservation() {
         origin: routeOrigin,
         destination: routeDestination,
         passPoint: routePassPoint,
+        pickupWindowStart,
+        pickupWindowEnd,
       },
     });
   }
@@ -203,6 +233,8 @@ export default function Reservation() {
         user_name: name.trim(),
         requested_at: requestedAt,
         payment_method: paymentMethod,
+        pickup_window_start: pickupWindowStart || null,
+        pickup_window_end: pickupWindowEnd || null,
       });
       clearDraft(id);
       // access_tokenはタブ単位(sessionStorage)に加え、タブを閉じた後でも同じ
@@ -258,6 +290,14 @@ export default function Reservation() {
       <header className="mb-4">
         <h2 className="text-xl font-semibold">{item.name}</h2>
         <div className="text-sm">場所: {item.location}</div>
+        {/* RouteTestで受取時間帯を選択してきた場合のみ表示する(入力画面・
+            確認画面の両方で確認できるようheaderに置く)。選択していない場合
+            (ItemListから直接来た等)はこのブロック自体を出さない。 */}
+        {pickupWindowStart && pickupWindowEnd && (
+          <div className="text-sm text-gray-600">
+            受取時間帯: {formatPickupWindow(pickupWindowStart, pickupWindowEnd)}
+          </div>
+        )}
       </header>
 
       {!isConfirmStep ? (
@@ -368,6 +408,8 @@ export default function Reservation() {
                     origin: routeOrigin,
                     destination: routeDestination,
                     passPoint: routePassPoint,
+                    pickupWindowStart,
+                    pickupWindowEnd,
                   },
                 })
               }

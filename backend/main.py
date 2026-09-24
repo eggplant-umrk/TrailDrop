@@ -269,6 +269,16 @@ def create_reservation(reservation: ReservationCreate):
                         else None
                     ),
                     "p_payment_method": reservation.payment_method,
+                    "p_pickup_window_start": (
+                        reservation.pickup_window_start.isoformat()
+                        if reservation.pickup_window_start is not None
+                        else None
+                    ),
+                    "p_pickup_window_end": (
+                        reservation.pickup_window_end.isoformat()
+                        if reservation.pickup_window_end is not None
+                        else None
+                    ),
                 },
             )
             .execute()
