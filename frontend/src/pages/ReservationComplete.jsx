@@ -25,13 +25,40 @@ function buildGoogleMapsUrl({ destination, passPoint }) {
   return `https://www.google.com/maps/dir/?${params.toString()}`;
 }
 
+// Backend/DBのstatusは'pending'と'completed'のみ(schema.sqlのcheck制約)。
+// それ以外の値は受取済みとも受付済みとも扱わず、状態不明として表示する。
+const STATUS_DISPLAY = {
+  pending: {
+    heading: "予約受付済み",
+    description: "受取時にこの画面のQRコードを現地スタッフに提示してください。",
+    className: "bg-[#eef6ec] text-[#2f6f3e]",
+  },
+  completed: {
+    heading: "受取済み",
+    description: "この予約はスタッフによる受取確認が完了しています。",
+    className: "bg-blue-50 text-blue-800",
+  },
+};
+
+const UNKNOWN_STATUS_DISPLAY = {
+  heading: "予約状態を確認できません",
+  description: "お手数ですが現地スタッフにお問い合わせください。",
+  className: "bg-gray-100 text-gray-700",
+};
+
 export default function ReservationComplete() {
   const { id } = useParams();
   const location = useLocation();
   const navigate = useNavigate();
   const [reservation, setReservation] = useState(null);
+  // 商品名はGET /itemsの正式な商品データからitem_idで引く。取得できない場合は
+  // 推測で補わず「取得できませんでした」と表示する。
+  const [itemTitle, setItemTitle] = useState(null);
+  const [itemTitleError, setItemTitleError] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  // 「最新の状態に更新」ボタンで予約を再取得するためのカウンタ。
+  const [reloadCount, setReloadCount] = useState(0);
 
   useEffect(() => {
     let mounted = true;
@@ -49,7 +76,23 @@ export default function ReservationComplete() {
         }
 
         const res = await api.getReservation(id, accessToken);
-        if (mounted) setReservation(res);
+        if (!mounted) return;
+        setReservation(res);
+
+        // 商品名の取得失敗は予約表示自体を妨げない。
+        try {
+          const items = await api.getItems();
+          const found = (items || []).find((it) => String(it.id) === String(res.item_id));
+          if (mounted) {
+            setItemTitle(found?.title || null);
+            setItemTitleError(!found?.title);
+          }
+        } catch (e) {
+          if (mounted) {
+            setItemTitle(null);
+            setItemTitleError(true);
+          }
+        }
       } catch (e) {
         if (mounted) setError(e.message || "予約情報の取得に失敗しました");
       } finally {
@@ -59,7 +102,7 @@ export default function ReservationComplete() {
 
     load();
     return () => (mounted = false);
-  }, [id, location.state]);
+  }, [id, location.state, reloadCount]);
 
   // RouteTest経由で予約した場合のみ、Google Maps引き継ぎに使う経路情報を持つ。
   // ItemListから直接予約した場合や、stateを保持しないリロード直後は
@@ -100,30 +143,59 @@ export default function ReservationComplete() {
     );
   if (!reservation) return <div className="p-4">予約情報が見つかりません。</div>;
 
+  const statusDisplay = STATUS_DISPLAY[reservation.status] || UNKNOWN_STATUS_DISPLAY;
+  const isPending = reservation.status === "pending";
+
   return (
     <div className="min-h-screen p-4 bg-[#fffef6] text-[#16381b] flex flex-col items-center">
       <div className="w-full max-w-sm bg-white p-4 rounded-md shadow">
-        <h2 className="text-lg font-semibold mb-2">予約完了</h2>
+        <div className={`mb-4 rounded p-3 ${statusDisplay.className}`} aria-live="polite">
+          <h2 className="text-lg font-semibold">{statusDisplay.heading}</h2>
+          <p className="mt-1 text-sm">{statusDisplay.description}</p>
+        </div>
         <div className="mb-3">予約番号: <span className="font-mono">{reservation.id}</span></div>
         <div className="mb-3">氏名: {reservation.user_name}</div>
-        <div className="mb-3">商品: {reservation.item_id}</div>
+        <div className="mb-3">
+          商品:{" "}
+          {itemTitle ? (
+            itemTitle
+          ) : (
+            <span className="text-sm text-gray-500">
+              {itemTitleError ? "商品情報を取得できませんでした" : "読み込み中…"}
+            </span>
+          )}
+        </div>
         {reservation.requested_at && (
           <div className="mb-3">希望日時: {formatRequestedAt(reservation.requested_at)}</div>
         )}
-        <div className="flex justify-center my-3">
-          {reservation.qr_token ? (
-            <QRCodeCanvas value={String(reservation.qr_token)} size={180} />
-          ) : (
-            <div className="text-sm text-gray-500">(QR生成用のトークンがありません)</div>
-          )}
-        </div>
-        {reservation.qr_token && (
-          <div className="mb-3 text-center">
-            <div className="text-xs text-gray-500">QRが読み取れない場合：</div>
-            <div className="font-mono text-sm break-all">{reservation.qr_token}</div>
-          </div>
+        {/* QRは受取前(pending)のみ表示する。受取済み・状態不明の予約でQRを
+            提示させないため。 */}
+        {isPending && (
+          <>
+            <div className="flex justify-center my-3">
+              {reservation.qr_token ? (
+                <QRCodeCanvas value={String(reservation.qr_token)} size={180} />
+              ) : (
+                <div className="text-sm text-gray-500">(QR生成用のトークンがありません)</div>
+              )}
+            </div>
+            {reservation.qr_token && (
+              <div className="mb-3 text-center">
+                <div className="text-xs text-gray-500">QRが読み取れない場合：</div>
+                <div className="font-mono text-sm break-all">{reservation.qr_token}</div>
+              </div>
+            )}
+            <div className="text-xs text-gray-500">この画面を現地スタッフに提示してください。</div>
+          </>
         )}
-        <div className="text-xs text-gray-500">この画面を現地スタッフに提示してください。</div>
+
+        <button
+          type="button"
+          onClick={() => setReloadCount((count) => count + 1)}
+          className="mt-4 w-full rounded px-4 py-2 text-sm bg-gray-200"
+        >
+          最新の状態に更新
+        </button>
 
         {routeContext && (
           <div className="mt-4">
