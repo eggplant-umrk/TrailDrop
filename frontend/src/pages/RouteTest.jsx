@@ -44,6 +44,15 @@ function parseTimeStringToMinutes(value) {
   return Number(match[1]) * 60 + Number(match[2]);
 }
 
+// "HH:MM:SS" / "HH:MM" から表示用の"HH:MM"を取り出す。time型には日付・
+// timezoneの概念が無いため、Dateへの変換は行わず文字列のまま扱う
+// (parseTimeStringToMinutesと同じ抽出方法)。
+function formatPickupHours(value) {
+  if (typeof value !== "string") return null;
+  const match = value.match(/^(\d{2}):(\d{2})/);
+  return match ? `${match[1]}:${match[2]}` : null;
+}
+
 // 商品の受取可能時間(pickup_available_from/to)に、実効受取予定時刻
 // (pass_at + windowOffsetMinutes、以前は2時間幅の受取枠全体との重なりで
 // 判定していたが、枠の端だけが営業時間に触れていて実際の通過時刻は営業時間外、
@@ -309,6 +318,16 @@ export default function RouteTest() {
                         </div>
                         <div className="text-sm text-gray-600">{item.location_name}</div>
                         <div className="text-sm mt-1">¥{item.price}（残り{item.stock}）</div>
+                        {/* ユーザーが選択した「受取時間」(上のセクション)とは別物と
+                            分かるよう、商品自体の営業時間であることを明示するラベル
+                            にする。片方でも未設定なら表示しない(既存のNULL扱いと
+                            同じ)。 */}
+                        {item.pickup_available_from && item.pickup_available_to && (
+                          <div className="text-xs text-gray-500 mt-1">
+                            商品受取可能時間: {formatPickupHours(item.pickup_available_from)}
+                            〜{formatPickupHours(item.pickup_available_to)}
+                          </div>
+                        )}
                       </div>
                       <Link
                         to={`/reserve/${item.id}`}
