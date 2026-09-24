@@ -24,7 +24,18 @@ const STATUS_MESSAGES = {
   503: "スタッフ認証が設定されていません。",
 };
 
+// verify_qrは409を「すでに受取済み(completed)」と「キャンセル済み
+// (cancelled)」の両方に使うため、detailの文言で区別する。errorMessage()
+// (client.js)はdetailが文字列ならそのまま返すので、Backend/DEMO_MODEの
+// どちらでも requestError.message === "Reservation is cancelled" になる。
+function isCancelledConflict(requestError) {
+  return requestError?.status === 409 && requestError?.message === "Reservation is cancelled";
+}
+
 function resolveErrorMessage(requestError) {
+  if (isCancelledConflict(requestError)) {
+    return "この予約はキャンセル済みのため、受け渡しできません。";
+  }
   return STATUS_MESSAGES[requestError?.status] || requestError?.message || "QR検証に失敗しました。";
 }
 
@@ -65,7 +76,11 @@ export default function StaffVerify() {
       setItemTitle(title);
       setResult(response);
     } catch (requestError) {
-      setError({ status: requestError.status, message: resolveErrorMessage(requestError) });
+      setError({
+        status: requestError.status,
+        cancelled: isCancelledConflict(requestError),
+        message: resolveErrorMessage(requestError),
+      });
     } finally {
       setLoading(false);
     }
@@ -108,7 +123,7 @@ export default function StaffVerify() {
           {error && (
             <p
               className={`text-sm ${
-                error.status === 409 ? "text-blue-700" : "text-red-600"
+                error.status === 409 && !error.cancelled ? "text-blue-700" : "text-red-600"
               }`}
             >
               {error.message}

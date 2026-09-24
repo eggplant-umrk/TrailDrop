@@ -24,7 +24,7 @@ create table if not exists public.reservations (
     user_name varchar not null,
     qr_token uuid not null unique default gen_random_uuid(),
     access_token uuid not null unique default gen_random_uuid(),
-    status varchar not null default 'pending' check (status in ('pending', 'completed')),
+    status varchar not null default 'pending' check (status in ('pending', 'completed', 'cancelled')),
     requested_at timestamptz,
     reserved_at timestamptz default now()
 );
@@ -43,6 +43,13 @@ where status is null;
 
 alter table public.reservations alter column qr_token set not null;
 alter table public.reservations alter column status set not null;
+
+-- The status check constraint above only applies on a fresh create. Widen it
+-- on existing projects too, to allow the 'cancelled' status. This was
+-- originally declared inline (unnamed) inside the CREATE TABLE, so Postgres
+-- assigned it the default name "reservations_status_check".
+alter table public.reservations
+    drop constraint if exists reservations_status_check;
 
 do $$
 begin
@@ -78,6 +85,17 @@ begin
                 (pickup_available_from is null) = (pickup_available_to is null)
                 and (pickup_available_from is null or pickup_available_from < pickup_available_to)
             );
+    end if;
+
+    if not exists (
+        select 1
+        from pg_constraint
+        where conname = 'reservations_status_check'
+          and conrelid = 'public.reservations'::regclass
+    ) then
+        alter table public.reservations
+            add constraint reservations_status_check
+            check (status in ('pending', 'completed', 'cancelled'));
     end if;
 end
 $$;
@@ -150,6 +168,65 @@ $$;
 revoke all on function public.create_reservation_with_stock(uuid, varchar, timestamptz)
 from public, anon, authenticated;
 grant execute on function public.create_reservation_with_stock(uuid, varchar, timestamptz)
+to service_role;
+
+-- Cancels a pending reservation and returns one unit of stock to its item,
+-- as a single atomic operation. Allowed transition is pending -> cancelled
+-- only; completed/cancelled reservations raise RESERVATION_NOT_CANCELLABLE.
+--
+-- The initial SELECT ... FOR UPDATE locks the reservation row so that two
+-- concurrent cancel calls for the same reservation cannot both observe
+-- 'pending' and both return stock: the second call blocks until the first
+-- commits, then sees the already-cancelled status and is rejected.
+create or replace function public.cancel_reservation_with_stock(
+    p_reservation_id uuid,
+    p_access_token uuid
+)
+returns setof public.reservations
+language plpgsql
+security invoker
+set search_path = ''
+as $$
+declare
+    cancelled_reservation public.reservations;
+    current_status varchar;
+begin
+    select status into current_status
+    from public.reservations
+    where id = p_reservation_id
+      and access_token = p_access_token
+    for update;
+
+    if not found then
+        raise exception 'RESERVATION_NOT_FOUND' using errcode = 'P0003';
+    end if;
+
+    if current_status <> 'pending' then
+        raise exception 'RESERVATION_NOT_CANCELLABLE' using errcode = 'P0004';
+    end if;
+
+    update public.reservations
+    set status = 'cancelled'
+    where id = p_reservation_id
+      and access_token = p_access_token
+      and status = 'pending'
+    returning * into cancelled_reservation;
+
+    if not found then
+        raise exception 'RESERVATION_NOT_CANCELLABLE' using errcode = 'P0004';
+    end if;
+
+    update public.items
+    set stock = stock + 1
+    where id = cancelled_reservation.item_id;
+
+    return next cancelled_reservation;
+end;
+$$;
+
+revoke all on function public.cancel_reservation_with_stock(uuid, uuid)
+from public, anon, authenticated;
+grant execute on function public.cancel_reservation_with_stock(uuid, uuid)
 to service_role;
 
 insert into public.items (id, title, type, price, stock, location_name)
