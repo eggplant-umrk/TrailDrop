@@ -43,6 +43,20 @@ class ReservationCreate(BaseModel):
             raise ValueError("requested_at must be in the future")
         return value
 
+    # requested_atと同じくtimezone offset必須(naive datetimeは422で拒否)。
+    # このフィールド単体のvalidatorをmodel_validator(下のordering check)
+    # より先に走らせることで、tz-aware/naiveが混在した状態でstart>=endを
+    # 比較してTypeErrorになり500が漏れる、という事態を未然に防ぐ
+    # (Pydantic v2はfield_validatorが全て通ってからmodel_validator(mode=
+    # "after")を実行するため、ここで拒否されればordering checkには到達
+    # しない)。
+    @field_validator("pickup_window_start", "pickup_window_end")
+    @classmethod
+    def pickup_window_requires_timezone(cls, value: datetime | None):
+        if value is not None and value.utcoffset() is None:
+            raise ValueError("pickup_window_start/pickup_window_end must include a timezone offset")
+        return value
+
     # pickup_window_start/endはRPC(create_reservation_with_stock)側でも
     # reservations_pickup_window_consistent制約で二重に検証されるが、ここで
     # 先に弾くことでBackend/DBの往復なしに422で拒否できる(requested_atの

@@ -384,3 +384,105 @@ class TestCreateReservationPickupWindowOrdering:
         body = response.json()
         assert body["pickup_window_start"] is None
         assert body["pickup_window_end"] is None
+
+
+def naive_iso(days=1):
+    # timezone情報を持たないISO文字列(offsetサフィックスなし)。
+    return (datetime.now() + timedelta(days=days)).isoformat()
+
+
+class TestCreateReservationPickupWindowTimezone:
+    """PMレビューM1: requested_atと同じくpickup_window_start/endにも
+    timezone offset必須のバリデーションを課す。naive/aware混在時に
+    ordering check(start>=end比較)でTypeError→500にならないことも
+    このテストクラスで担保する(混在ケースが422で先に弾かれることを
+    確認することで検証する)。
+    """
+
+    def test_naive_pickup_window_is_rejected(self, client, fake_supabase):
+        start = naive_iso(days=1)
+        end = naive_iso(days=1)
+
+        response = create(
+            client,
+            payment_method="paypay",
+            pickup_window_start=start,
+            pickup_window_end=end,
+        )
+
+        assert response.status_code == 422
+        assert fake_supabase.rpc_call_count == 0
+
+    def test_mixed_timezone_pickup_window_is_rejected(self, client, fake_supabase):
+        # startはtimezone-aware、endはnaive。500にならず422で拒否されること
+        # (ordering checkのstart>=end比較に両者が渡らないことの確認)。
+        response = create(
+            client,
+            payment_method="paypay",
+            pickup_window_start=future_iso(days=1),
+            pickup_window_end=naive_iso(days=1),
+        )
+
+        assert response.status_code == 422
+        assert fake_supabase.rpc_call_count == 0
+
+    def test_mixed_timezone_pickup_window_is_rejected_other_order(self, client, fake_supabase):
+        # startがnaive、endがtimezone-awareの逆パターンも同様に422。
+        response = create(
+            client,
+            payment_method="paypay",
+            pickup_window_start=naive_iso(days=1),
+            pickup_window_end=future_iso(days=1),
+        )
+
+        assert response.status_code == 422
+        assert fake_supabase.rpc_call_count == 0
+
+    def test_timezone_aware_pickup_window_succeeds(self, client, fake_supabase):
+        start = future_iso(days=1)
+        end = (datetime.now(timezone.utc) + timedelta(days=1, hours=2)).isoformat()
+
+        response = create(
+            client,
+            payment_method="paypay",
+            pickup_window_start=start,
+            pickup_window_end=end,
+        )
+
+        assert response.status_code == 201
+        body = response.json()
+        assert body["pickup_window_start"] is not None
+        assert body["pickup_window_end"] is not None
+
+
+class TestReservationErrorPickupWindowCheckViolation:
+    """PMレビューM3: DBのreservations_pickup_window_consistent制約
+    (check_violation, PostgreSQL error code 23514)を、main.reservation_error
+    が422へ正しくマッピングすることを確認する。models.pyのバリデーションで
+    通常はここに到達しないため(defense in depth)、RPCを直接叩いた場合を
+    想定してreservation_error()を直接呼ぶユニットテストとする。502(曖昧な
+    失敗)のままだとFrontend(Reservation.jsx)のDEFINITELY_NOT_CREATED_
+    STATUSESに含まれず、「予約されたか分からない」曖昧エラー扱いになって
+    しまう回帰を防ぐ。
+    """
+
+    def test_check_violation_is_mapped_to_422(self):
+        exc = FakePostgrestError(
+            "new row for relation \"reservations\" violates check constraint "
+            '"reservations_pickup_window_consistent"',
+            "23514",
+        )
+
+        http_exc = main.reservation_error(exc)
+
+        assert http_exc.status_code == 422
+
+    def test_check_violation_does_not_fall_through_to_502(self):
+        # 23514はどの既存メッセージパターン(EXPERIENCE_DATE_REQUIRED等)にも
+        # 一致しないため、この分岐を追加する前は最後のfallback(502)に
+        # 落ちていた。422の方が優先されることを明示的に確認する。
+        exc = FakePostgrestError("check constraint violation", "23514")
+
+        http_exc = main.reservation_error(exc)
+
+        assert http_exc.status_code != 502

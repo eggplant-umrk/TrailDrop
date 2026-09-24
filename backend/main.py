@@ -208,6 +208,15 @@ def reservation_error(exc: Exception) -> HTTPException:
         return HTTPException(status_code=404, detail="Item not found")
     if code == "P0001" or "OUT_OF_STOCK" in message:
         return HTTPException(status_code=409, detail="Item is out of stock")
+    # 23514 = PostgreSQLのcheck_violation。reservations_pickup_window_
+    # consistent制約(models.pyのバリデーションと同じルール)に引っかかった
+    # 場合で、通常はBackend側のmodel_validatorで先に弾かれるため、ここに
+    # 到達するのはRPCを直接叩いた場合などの想定外経路のみ(defense in
+    # depth)。ここで拾わないと下のフォールバック(502)になり、Frontend側は
+    # 「予約されたか分からない」曖昧な失敗として扱ってしまう
+    # (DEFINITELY_NOT_CREATED_STATUSESに422はあるが502は無いため)。
+    if code == "23514":
+        return HTTPException(status_code=422, detail="Pickup window is invalid")
     return HTTPException(status_code=502, detail="Failed to create reservation")
 
 
