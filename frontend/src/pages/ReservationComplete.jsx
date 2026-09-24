@@ -20,6 +20,30 @@ function formatRequestedAt(value) {
   }).format(new Date(value));
 }
 
+// RouteTestで選択した受取時間帯の表示用。start/endが両方揃っている場合の
+// み範囲表示し、片方でも欠けていれば「未設定」とする(この機能追加以前の
+// 既存予約・RouteTestを経由しない予約はpickup_window_start/endが両方
+// nullのため、常にこちらになる)。
+function formatPickupWindow(startValue, endValue) {
+  if (!startValue || !endValue) return "未設定";
+  const dateFormatter = new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
+  const timeFormatter = new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
+  return `${dateFormatter.format(new Date(startValue))}〜${timeFormatter.format(new Date(endValue))}`;
+}
+
 function buildGoogleMapsUrl({ destination, passPoint }) {
   const params = new URLSearchParams({
     api: "1",
@@ -297,6 +321,10 @@ export default function ReservationComplete() {
         {reservation.requested_at && (
           <div className="mb-3">希望日時: {formatRequestedAt(reservation.requested_at)}</div>
         )}
+        <div className="mb-3">
+          受取時間帯:{" "}
+          {formatPickupWindow(reservation.pickup_window_start, reservation.pickup_window_end)}
+        </div>
         {reservation.payment_method && (
           <div className="mb-3">
             <div>

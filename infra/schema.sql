@@ -39,6 +39,14 @@ alter table public.reservations
     add column if not exists payment_method varchar,
     add column if not exists payment_status varchar not null default 'pending';
 
+-- Optional pickup time window (start/end), selected by the customer in
+-- RouteTest.jsx. Independent of requested_at (single exact time, experience
+-- items only); nullable so existing reservations and non-RouteTest flows
+-- are unaffected.
+alter table public.reservations
+    add column if not exists pickup_window_start timestamptz,
+    add column if not exists pickup_window_end timestamptz;
+
 -- Apply the tightened constraints when this script runs against an existing project.
 update public.reservations
 set qr_token = gen_random_uuid()
@@ -126,6 +134,22 @@ begin
             add constraint reservations_payment_status_check
             check (payment_status in ('pending', 'paid', 'cancelled'));
     end if;
+
+    -- Same shape as items_pickup_window_consistent above: both columns
+    -- null together, or both set with start strictly before end.
+    if not exists (
+        select 1
+        from pg_constraint
+        where conname = 'reservations_pickup_window_consistent'
+          and conrelid = 'public.reservations'::regclass
+    ) then
+        alter table public.reservations
+            add constraint reservations_pickup_window_consistent
+            check (
+                (pickup_window_start is null) = (pickup_window_end is null)
+                and (pickup_window_start is null or pickup_window_start < pickup_window_end)
+            );
+    end if;
 end
 $$;
 
@@ -147,17 +171,23 @@ grant select, insert, update on table public.reservations to service_role;
 
 drop function if exists public.create_reservation_with_stock(uuid, varchar);
 drop function if exists public.create_reservation_with_stock(uuid, varchar, timestamptz);
+drop function if exists public.create_reservation_with_stock(uuid, varchar, timestamptz, varchar);
 
 -- payment_method is validated both here (defense in depth) and, primarily,
 -- by the Backend's create_reservation() before this RPC is ever called.
 -- payment_status is always 'paid' on a successful insert: there is no real
 -- payment gateway, so the mock payment "succeeds" synchronously with stock
--- decrement, atomically, in this same transaction.
+-- decrement, atomically, in this same transaction. pickup_window_start/end
+-- are optional (RouteTest-selected pickup time range) and independent of
+-- requested_at; both null unless the Frontend sent a RouteTest-selected
+-- window.
 create or replace function public.create_reservation_with_stock(
     p_item_id uuid,
     p_user_name varchar,
     p_requested_at timestamptz default null,
-    p_payment_method varchar default null
+    p_payment_method varchar default null,
+    p_pickup_window_start timestamptz default null,
+    p_pickup_window_end timestamptz default null
 )
 returns setof public.reservations
 language plpgsql
@@ -193,13 +223,18 @@ begin
         raise exception 'REQUESTED_AT_IN_PAST' using errcode = '22023';
     end if;
 
-    insert into public.reservations (item_id, user_name, requested_at, payment_method, payment_status)
+    insert into public.reservations (
+        item_id, user_name, requested_at, payment_method, payment_status,
+        pickup_window_start, pickup_window_end
+    )
     values (
         p_item_id,
         p_user_name,
         case when item_type = 'experience' then p_requested_at else null end,
         p_payment_method,
-        'paid'
+        'paid',
+        p_pickup_window_start,
+        p_pickup_window_end
     )
     returning * into created_reservation;
 
@@ -207,9 +242,9 @@ begin
 end;
 $$;
 
-revoke all on function public.create_reservation_with_stock(uuid, varchar, timestamptz, varchar)
+revoke all on function public.create_reservation_with_stock(uuid, varchar, timestamptz, varchar, timestamptz, timestamptz)
 from public, anon, authenticated;
-grant execute on function public.create_reservation_with_stock(uuid, varchar, timestamptz, varchar)
+grant execute on function public.create_reservation_with_stock(uuid, varchar, timestamptz, varchar, timestamptz, timestamptz)
 to service_role;
 
 -- Cancels a pending reservation and returns one unit of stock to its item,
