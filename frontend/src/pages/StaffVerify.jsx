@@ -34,6 +34,9 @@ export default function StaffVerify() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null);
+  // 受取完了した予約の商品名。GET /itemsの正式な商品データからitem_idで引き、
+  // 取得できない場合は推測せず取得失敗として表示する。
+  const [itemTitle, setItemTitle] = useState(null);
 
   async function handleSubmit(event) {
     event.preventDefault();
@@ -45,11 +48,22 @@ export default function StaffVerify() {
     setLoading(true);
     setError(null);
     setResult(null);
+    setItemTitle(null);
 
     try {
       const response = await api.verifyQr(qrToken.trim(), staffToken);
-      setResult(response);
       setQrToken("");
+      // 商品名の取得失敗は受取完了の表示を妨げない。
+      let title = null;
+      try {
+        const items = await api.getItems();
+        const found = (items || []).find((it) => String(it.id) === String(response.item_id));
+        title = found?.title || null;
+      } catch (itemsError) {
+        title = null;
+      }
+      setItemTitle(title);
+      setResult(response);
     } catch (requestError) {
       setError({ status: requestError.status, message: resolveErrorMessage(requestError) });
     } finally {
@@ -122,7 +136,13 @@ export default function StaffVerify() {
               </div>
               <div>
                 <dt className="text-sm text-gray-600">商品</dt>
-                <dd className="font-medium">{result.item_id}</dd>
+                <dd className="font-medium">
+                  {itemTitle || (
+                    <span className="text-sm text-gray-500">
+                      商品情報を取得できませんでした（ID: {result.item_id}）
+                    </span>
+                  )}
+                </dd>
               </div>
               {result.requested_at && (
                 <div>
