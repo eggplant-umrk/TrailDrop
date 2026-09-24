@@ -25,8 +25,9 @@ function buildGoogleMapsUrl({ destination, passPoint }) {
   return `https://www.google.com/maps/dir/?${params.toString()}`;
 }
 
-// Backend/DBのstatusは'pending'と'completed'のみ(schema.sqlのcheck制約)。
-// それ以外の値は受取済みとも受付済みとも扱わず、状態不明として表示する。
+// Backend/DBのstatusは'pending'・'completed'・'cancelled'のみ
+// (schema.sqlのcheck制約)。それ以外の値はどれとも扱わず、状態不明として
+// 表示する。
 const STATUS_DISPLAY = {
   pending: {
     heading: "予約受付済み",
@@ -37,6 +38,11 @@ const STATUS_DISPLAY = {
     heading: "受取済み",
     description: "この予約はスタッフによる受取確認が完了しています。",
     className: "bg-blue-50 text-blue-800",
+  },
+  cancelled: {
+    heading: "キャンセル済み",
+    description: "この予約はキャンセルされ、在庫は返却されています。",
+    className: "bg-gray-100 text-gray-600",
   },
 };
 
@@ -51,6 +57,20 @@ const UNKNOWN_STATUS_DISPLAY = {
 // はこれまで通りe.messageを表示する。
 const REFRESH_ERROR_MESSAGE =
   "最新の状態を取得できませんでした。通信環境を確認して再度お試しください。";
+
+// キャンセル失敗も同様に、Backendの生のdetail文言(英語)をそのまま出さず
+// 固定の日本語メッセージにする。409(completed/cancelled済みからの拒否)だけ
+// 理由が伝わるよう個別のメッセージにし、それ以外は通信エラー等としてまとめる。
+const CANCEL_ERROR_MESSAGES = {
+  404: "予約が見つかりませんでした。",
+  409: "この予約はすでに受取済みまたはキャンセル済みのため、キャンセルできません。",
+};
+const CANCEL_GENERIC_ERROR_MESSAGE =
+  "予約をキャンセルできませんでした。通信環境を確認して再度お試しください。";
+
+function resolveCancelErrorMessage(err) {
+  return CANCEL_ERROR_MESSAGES[err?.status] || CANCEL_GENERIC_ERROR_MESSAGE;
+}
 
 export default function ReservationComplete() {
   const { id } = useParams();
@@ -70,6 +90,13 @@ export default function ReservationComplete() {
   // (初回取得が失敗していた場合の再試行手段)。
   const [itemReloadKey, setItemReloadKey] = useState(0);
 
+  // キャンセルはpendingの予約にのみ表示する破壊的な操作なので、誤操作を
+  // 防ぐためワンクッション(確認表示)を挟む。失敗しても表示中の予約情報は
+  // そのまま残し、更新(refreshError)とは別にエラーを表示する。
+  const [cancelConfirming, setCancelConfirming] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelError, setCancelError] = useState(null);
+
   // 商品名は予約情報の表示とは独立して取得する。取得中・失敗のいずれでも
   // 予約情報・status・QRの表示は妨げない。取得できない場合は推測で補わず
   // 「取得できませんでした」と表示する。
@@ -84,6 +111,14 @@ export default function ReservationComplete() {
     };
   }, []);
 
+  // 予約照会・キャンセルの両方で使う、同じ解決ロジック(state優先、
+  // sessionStorageへフォールバック)を1箇所にまとめる。
+  function getAccessToken() {
+    const tokenFromState = location.state?.access_token || null;
+    const tokenFromSession = sessionStorage.getItem(`traildrop_access_token_${id}`);
+    return tokenFromState || tokenFromSession;
+  }
+
   async function fetchReservation({ isInitial }) {
     if (isInitial) {
       setInitialLoading(true);
@@ -94,9 +129,7 @@ export default function ReservationComplete() {
     }
 
     try {
-      const tokenFromState = location.state?.access_token || null;
-      const tokenFromSession = sessionStorage.getItem(`traildrop_access_token_${id}`);
-      const accessToken = tokenFromState || tokenFromSession;
+      const accessToken = getAccessToken();
 
       if (!accessToken && import.meta.env.VITE_API_BASE_URL) {
         throw new Error("予約トークンが見つかりません");
@@ -123,6 +156,27 @@ export default function ReservationComplete() {
     fetchReservation({ isInitial: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
+
+  async function handleCancel() {
+    setCancelling(true);
+    setCancelError(null);
+    try {
+      const accessToken = getAccessToken();
+      const res = await api.cancelReservation(id, accessToken);
+      if (!mountedRef.current) return;
+      // status更新はBackend(cancel_reservation_with_stock RPC)からの応答を
+      // そのまま反映する。在庫返却もそのRPC内で同時に行われている前提で、
+      // Frontend側では在庫に関する処理を一切行わない。
+      setReservation(res);
+      setCancelConfirming(false);
+    } catch (e) {
+      if (!mountedRef.current) return;
+      setCancelError(resolveCancelErrorMessage(e));
+    } finally {
+      if (!mountedRef.current) return;
+      setCancelling(false);
+    }
+  }
 
   // 予約のitem_idが分かった時点で商品名を取得する。予約の再取得(初回・更新)
   // とは別のライフサイクルで動くため、商品名取得の成否が予約表示の
@@ -239,6 +293,55 @@ export default function ReservationComplete() {
                 <div className="font-mono text-sm break-all">{reservation.qr_token}</div>
               </div>
             )}
+
+            {/* キャンセルはpending(受取前)の予約にのみ表示する。completed/
+                cancelledの予約はキャンセル不可(Backend側でも拒否される)。 */}
+            {!cancelConfirming ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setCancelConfirming(true);
+                  setCancelError(null);
+                }}
+                disabled={refreshing}
+                className="mt-2 w-full rounded px-4 py-2 text-sm border border-red-300 text-red-700 disabled:opacity-50"
+              >
+                予約をキャンセルする
+              </button>
+            ) : (
+              <div className="mt-2 rounded border border-red-200 p-3">
+                <p className="text-sm text-red-700">本当にキャンセルしますか？</p>
+                <div className="mt-2 flex gap-2">
+                  <button
+                    type="button"
+                    onClick={handleCancel}
+                    disabled={cancelling}
+                    aria-busy={cancelling}
+                    className={`flex-1 rounded px-4 py-2 text-sm text-white ${
+                      cancelling ? "bg-red-300" : "bg-red-600"
+                    }`}
+                  >
+                    {cancelling ? "キャンセル中…" : "はい、キャンセルする"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCancelConfirming(false);
+                      setCancelError(null);
+                    }}
+                    disabled={cancelling}
+                    className="flex-1 rounded px-4 py-2 text-sm bg-gray-200 disabled:opacity-50"
+                  >
+                    いいえ
+                  </button>
+                </div>
+              </div>
+            )}
+            {cancelError && (
+              <p className="mt-2 text-sm text-red-600" role="alert">
+                {cancelError}（表示中の予約情報は変更していません）
+              </p>
+            )}
           </>
         )}
 
@@ -248,7 +351,7 @@ export default function ReservationComplete() {
             fetchReservation({ isInitial: false });
             setItemReloadKey((count) => count + 1);
           }}
-          disabled={refreshing}
+          disabled={refreshing || cancelling}
           aria-busy={refreshing}
           className={`mt-4 w-full rounded px-4 py-2 text-sm ${
             refreshing ? "bg-gray-100 text-gray-400" : "bg-gray-200"

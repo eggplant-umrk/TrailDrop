@@ -198,6 +198,21 @@ def reservation_error(exc: Exception) -> HTTPException:
     return HTTPException(status_code=502, detail="Failed to create reservation")
 
 
+def cancel_reservation_error(exc: Exception) -> HTTPException:
+    code = getattr(exc, "code", "")
+    message = getattr(exc, "message", str(exc))
+    # "RESERVATION_NOT_FOUND"はid・access_tokenの組が一致しない場合に使われる。
+    # get_reservation()と同じく、存在しないidと不正なtokenを区別しない
+    # (予約の存在を推測できないようにするため)。
+    if code == "P0003" or "RESERVATION_NOT_FOUND" in message:
+        return HTTPException(status_code=404, detail="Reservation not found")
+    # completed/cancelled済みなど、pending以外からのキャンセルは全てこちらになる。
+    # どちらの状態からの拒否かをここで区別する必要はない。
+    if code == "P0004" or "RESERVATION_NOT_CANCELLABLE" in message:
+        return HTTPException(status_code=409, detail="Reservation cannot be cancelled")
+    return HTTPException(status_code=502, detail="Failed to cancel reservation")
+
+
 @app.get("/items", response_model=list[Item])
 def list_items():
     try:
@@ -261,6 +276,39 @@ def get_reservation(
         raise
     except Exception as exc:
         raise HTTPException(status_code=502, detail="Failed to fetch reservation") from exc
+
+
+@app.post("/reservations/{reservation_id}/cancel", response_model=ReservationResponse)
+def cancel_reservation(
+    reservation_id: str,
+    x_reservation_token: str | None = Header(default=None, alias="X-Reservation-Token"),
+):
+    # get_reservation()と同じ理由で、tokenが無い場合は404にして
+    # (401ではなく)予約の存在自体を推測できないようにする。
+    if not x_reservation_token:
+        raise HTTPException(status_code=404, detail="Reservation not found")
+    try:
+        # status更新と在庫返却はcancel_reservation_with_stock RPC内で1つの
+        # トランザクションとして原子的に行う(行ロックにより二重キャンセルでの
+        # 在庫の二重返却を防ぐ)。Backend側では分割しない。
+        response = (
+            get_supabase()
+            .rpc(
+                "cancel_reservation_with_stock",
+                {
+                    "p_reservation_id": reservation_id,
+                    "p_access_token": x_reservation_token,
+                },
+            )
+            .execute()
+        )
+        if not response.data:
+            raise HTTPException(status_code=502, detail="Failed to cancel reservation")
+        return response.data[0]
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise cancel_reservation_error(exc) from exc
 
 
 @app.post("/qr/verify", response_model=QRVerifyResponse)

@@ -160,6 +160,53 @@ export async function getReservation(reservationId, reservationToken) {
   });
 }
 
+export async function cancelReservation(reservationId, reservationToken) {
+  if (DEMO_MODE) {
+    // Demo mode: mirror the real /reservations/{id}/cancel endpoint's
+    // status codes. A missing/mismatched token and an unknown id both
+    // return 404 (not 401) so the id's existence can't be probed, matching
+    // getReservation()'s access-token check and the Backend's cancel RPC.
+    // There is no stock to return here: demo items always come from the
+    // static demoGetItems() list, which createReservation() never
+    // decrements either.
+    try {
+      const raw = sessionStorage.getItem("demo_reservations") || "{}";
+      const map = JSON.parse(raw);
+      const res = map[reservationId];
+      if (!res || !reservationToken || res.access_token !== reservationToken) {
+        const err = new Error("Reservation not found");
+        err.status = 404;
+        throw err;
+      }
+      if (res.status !== "pending") {
+        const err = new Error("Reservation cannot be cancelled");
+        err.status = 409;
+        throw err;
+      }
+      res.status = "cancelled";
+      map[reservationId] = res;
+      sessionStorage.setItem("demo_reservations", JSON.stringify(map));
+      const { access_token: _accessToken, ...response } = res;
+      return response;
+    } catch (e) {
+      if (e && typeof e.status === "number") throw e;
+      const err = new Error("Failed to cancel reservation");
+      err.status = 502;
+      throw err;
+    }
+  }
+
+  const headers = {};
+  if (reservationToken) {
+    headers["X-Reservation-Token"] = reservationToken;
+  }
+
+  return await request(`/reservations/${encodeURIComponent(reservationId)}/cancel`, {
+    method: "POST",
+    headers,
+  });
+}
+
 export async function analyzeRoute({ origin, destination, departure_at }) {
   return await request(`/routes/analyze`, {
     method: "POST",
@@ -218,4 +265,11 @@ export async function verifyQr(qrToken, staffToken) {
   });
 }
 
-export default { getItems, createReservation, getReservation, analyzeRoute, verifyQr };
+export default {
+  getItems,
+  createReservation,
+  getReservation,
+  cancelReservation,
+  analyzeRoute,
+  verifyQr,
+};
