@@ -353,8 +353,12 @@ export default function Reservation() {
           <div className="flex gap-2">
             <button
               type="button"
+              // 確認画面の履歴を入力画面で置き換える(replace)。pushすると
+              // 入力内容を持った確認画面の履歴が残り、予約完了後にブラウザの
+              // 戻る操作でその確認画面へ戻って二重予約できてしまうため。
               onClick={() =>
                 navigate(`/reserve/${id}`, {
+                  replace: true,
                   state: {
                     origin: routeOrigin,
                     destination: routeDestination,
