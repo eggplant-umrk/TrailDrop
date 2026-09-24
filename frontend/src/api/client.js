@@ -237,8 +237,18 @@ export async function verifyQr(qrToken, staffToken) {
         err.status = 404;
         throw err;
       }
-      if (entry.status === "completed") {
-        const err = new Error("Reservation is already completed");
+      // pending以外は全て拒否する(completedはもちろん、cancelledも)。
+      // cancelledをcompletedと同じ扱いにしてしまうと、キャンセル済みの
+      // 予約が受け渡し完了扱いになってしまうため、絶対にここを通さない。
+      // メッセージは本番Backend(main.pyのverify_qr)と同じ文言にして、
+      // StaffVerify.jsxが本番/DEMO_MODEを区別せずcancelledを判定できる
+      // ようにする。
+      if (entry.status !== "pending") {
+        const err = new Error(
+          entry.status === "cancelled"
+            ? "Reservation is cancelled"
+            : "Reservation is already completed",
+        );
         err.status = 409;
         throw err;
       }

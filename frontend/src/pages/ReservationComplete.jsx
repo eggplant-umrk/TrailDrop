@@ -41,7 +41,7 @@ const STATUS_DISPLAY = {
   },
   cancelled: {
     heading: "キャンセル済み",
-    description: "この予約はキャンセルされ、在庫は返却されています。",
+    description: "この予約はキャンセルされました。",
     className: "bg-gray-100 text-gray-600",
   },
 };
@@ -351,7 +351,7 @@ export default function ReservationComplete() {
             fetchReservation({ isInitial: false });
             setItemReloadKey((count) => count + 1);
           }}
-          disabled={refreshing || cancelling}
+          disabled={refreshing || cancelling || cancelConfirming}
           aria-busy={refreshing}
           className={`mt-4 w-full rounded px-4 py-2 text-sm ${
             refreshing ? "bg-gray-100 text-gray-400" : "bg-gray-200"

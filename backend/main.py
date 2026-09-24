@@ -2,6 +2,7 @@ import os
 import secrets
 import threading
 import time
+from uuid import UUID
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -213,6 +214,16 @@ def cancel_reservation_error(exc: Exception) -> HTTPException:
     return HTTPException(status_code=502, detail="Failed to cancel reservation")
 
 
+def require_valid_reservation_id(reservation_id: str) -> None:
+    # FastAPIのpath型をUUIDにすると不正な値で422になってしまうため、ここで
+    # 手動検証して404にする(予約不存在と同じ扱いにするため。Postgres側の
+    # 22P02がそのまま漏れるのも防ぐ)。
+    try:
+        UUID(reservation_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Reservation not found")
+
+
 @app.get("/items", response_model=list[Item])
 def list_items():
     try:
@@ -287,6 +298,7 @@ def cancel_reservation(
     # (401ではなく)予約の存在自体を推測できないようにする。
     if not x_reservation_token:
         raise HTTPException(status_code=404, detail="Reservation not found")
+    require_valid_reservation_id(reservation_id)
     try:
         # status更新と在庫返却はcancel_reservation_with_stock RPC内で1つの
         # トランザクションとして原子的に行う(行ロックにより二重キャンセルでの
@@ -319,6 +331,28 @@ def verify_qr(
     require_staff_token(x_staff_token)
     try:
         supabase = get_supabase()
+
+        # cancelled予約はpendingと同じ「未完了」に見えてしまうため、更新を
+        # 試みる前に現在のstatusを見て、pending以外(completed/cancelled)を
+        # 明示的に区別して拒否する。これにより、cancelled予約が誤って
+        # completedへ更新されることは絶対にない。
+        existing = (
+            supabase
+            .table("reservations")
+            .select("status")
+            .eq("qr_token", str(request.qr_token))
+            .limit(1)
+            .execute()
+        )
+        if not existing.data:
+            raise HTTPException(status_code=404, detail="QR token not found")
+
+        current_status = existing.data[0]["status"]
+        if current_status == "cancelled":
+            raise HTTPException(status_code=409, detail="Reservation is cancelled")
+        if current_status == "completed":
+            raise HTTPException(status_code=409, detail="Reservation is already completed")
+
         response = (
             supabase
             .table("reservations")
@@ -330,7 +364,11 @@ def verify_qr(
         if response.data:
             return response.data[0]
 
-        existing = (
+        # 上のselectとこのupdateの間にstatusが変わった場合(競合)のフォール
+        # バック。updateは常に.eq("status", "pending")付きなので、pending
+        # 以外に変わっていれば0件のままここに来る。もう一度現在のstatusを
+        # 見て、どちらの理由で拒否するか判定する。
+        refreshed = (
             supabase
             .table("reservations")
             .select("status")
@@ -338,8 +376,10 @@ def verify_qr(
             .limit(1)
             .execute()
         )
-        if not existing.data:
+        if not refreshed.data:
             raise HTTPException(status_code=404, detail="QR token not found")
+        if refreshed.data[0]["status"] == "cancelled":
+            raise HTTPException(status_code=409, detail="Reservation is cancelled")
         raise HTTPException(status_code=409, detail="Reservation is already completed")
     except HTTPException:
         raise

@@ -200,3 +200,18 @@ class TestCancelReservation:
 
         assert response.status_code == 404
         assert fake_supabase.reservations[reservation["id"]]["status"] == "pending"
+
+    @pytest.mark.parametrize(
+        "invalid_id",
+        ["not-a-uuid", "12345", "11111111-1111-1111-1111-11111111111"],
+    )
+    def test_invalid_reservation_id_returns_404_without_hitting_the_rpc(
+        self, client, fake_supabase, invalid_id
+    ):
+        # PM review MINOR m1: a malformed id must be rejected as 404 (same as
+        # "not found") before it ever reaches the RPC, instead of surfacing
+        # Postgres's raw 22P02 "invalid input syntax for type uuid" error.
+        response = cancel(client, invalid_id, str(uuid4()))
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Reservation not found"
