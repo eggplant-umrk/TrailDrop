@@ -18,6 +18,7 @@ from models import (
     ReservationResponse,
     RouteAnalysisRequest,
     RouteAnalysisResponse,
+    StaffReservationResponse,
 )
 from route_analysis import RouteAnalysisError, analyze_route
 
@@ -404,6 +405,56 @@ def verify_qr(
         raise
     except Exception as exc:
         raise HTTPException(status_code=502, detail="Failed to verify QR token") from exc
+
+
+@app.get("/staff/reservations/{reservation_id}", response_model=StaffReservationResponse)
+def get_staff_reservation(
+    reservation_id: str,
+    x_staff_token: str | None = Header(default=None, alias="X-Staff-Token"),
+):
+    # X-Reservation-Tokenは使わない(顧客用の予約照会とは別の認可軸)。
+    # スタッフはX-Staff-Tokenのみで、どの予約でも参照できる。
+    require_staff_token(x_staff_token)
+    require_valid_uuid(reservation_id)
+    try:
+        supabase = get_supabase()
+        response = (
+            supabase
+            .table("reservations")
+            .select("*")
+            .eq("id", reservation_id)
+            .limit(1)
+            .execute()
+        )
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Reservation not found")
+        reservation = response.data[0]
+
+        # 商品名の取得に失敗しても予約情報自体の表示は妨げない
+        # (ReservationComplete.jsx/StaffVerify.jsxの既存の商品名解決と同じ
+        # フォールバック方針)。access_token・qr_tokenはStaffReservationResponse
+        # に定義していないため、reservationが実際は持っていても
+        # response_modelによって自動的に除外される。
+        item_title = None
+        try:
+            item_response = (
+                supabase
+                .table("items")
+                .select("title")
+                .eq("id", reservation["item_id"])
+                .limit(1)
+                .execute()
+            )
+            if item_response.data:
+                item_title = item_response.data[0]["title"]
+        except Exception:
+            item_title = None
+
+        return {**reservation, "item_title": item_title}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="Failed to fetch reservation") from exc
 
 
 @app.post("/routes/analyze", response_model=RouteAnalysisResponse)

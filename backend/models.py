@@ -64,6 +64,23 @@ class QRVerifyResponse(ReservationResponse):
     pass
 
 
+# スタッフ向け予約確認(GET /staff/reservations/{id})専用のレスポンス。
+# 読み取り専用の確認用途なので、ReservationResponseは継承せず返す項目を
+# 明示する。access_token(顧客の照会用)とqr_token(受取完了に使う秘密情報)
+# は絶対に含めない。qr_tokenを返すと、予約IDだけでQR受取確認まで通せて
+# しまうため。item_titleはBackend側でitemsテーブルから引いて埋める。
+class StaffReservationResponse(BaseModel):
+    id: UUID
+    item_id: UUID
+    item_title: str | None = None
+    user_name: str
+    status: str
+    requested_at: datetime | None = None
+    reserved_at: datetime | None = None
+    payment_method: str | None = None
+    payment_status: str | None = None
+
+
 class QRVerifyRequest(BaseModel):
     qr_token: UUID
 

@@ -301,6 +301,56 @@ export async function verifyQr(qrToken, staffToken) {
   });
 }
 
+// スタッフ用の予約確認(読み取り専用)。X-Reservation-Tokenは使わず、
+// X-Staff-Tokenのみで認可する。access_token・qr_tokenはBackend/DEMO_MODE
+// どちらの応答にも含めない。
+export async function getStaffReservation(reservationId, staffToken) {
+  if (DEMO_MODE) {
+    // Demo mode: verifyQr()と同じく、STAFF_API_TOKENの実体が無いので
+    // 非空であれば受理する。
+    if (!staffToken) {
+      const err = new Error("Invalid staff token");
+      err.status = 401;
+      throw err;
+    }
+    try {
+      const raw = sessionStorage.getItem("demo_reservations") || "{}";
+      const map = JSON.parse(raw);
+      const entry = map[reservationId];
+      if (!entry) {
+        const err = new Error("Reservation not found");
+        err.status = 404;
+        throw err;
+      }
+      const items = await getItems();
+      const found = (items || []).find((it) => String(it.id) === String(entry.item_id));
+      // 本番のStaffReservationResponseと同じ項目だけを返す。access_tokenと
+      // qr_token(受取完了に使う秘密情報)は絶対に含めない。
+      return {
+        id: entry.id,
+        item_id: entry.item_id,
+        item_title: found?.title || null,
+        user_name: entry.user_name,
+        status: entry.status,
+        requested_at: entry.requested_at ?? null,
+        reserved_at: entry.reserved_at ?? null,
+        payment_method: entry.payment_method ?? null,
+        payment_status: entry.payment_status ?? null,
+      };
+    } catch (e) {
+      if (e && typeof e.status === "number") throw e;
+      const err = new Error("Failed to fetch reservation");
+      err.status = 502;
+      throw err;
+    }
+  }
+
+  return await request(`/staff/reservations/${encodeURIComponent(reservationId)}`, {
+    method: "GET",
+    headers: { "X-Staff-Token": staffToken },
+  });
+}
+
 export default {
   getItems,
   createReservation,
@@ -308,4 +358,5 @@ export default {
   cancelReservation,
   analyzeRoute,
   verifyQr,
+  getStaffReservation,
 };
