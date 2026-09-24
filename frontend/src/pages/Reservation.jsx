@@ -22,8 +22,42 @@ const PAYMENT_METHODS = [
 // 可能性を否定できないため、専用の警告文言にする(Idempotency-Keyは
 // 今回実装しないため、Frontend側で「確実に失敗した」と言い切れない)。
 const DEFINITELY_NOT_CREATED_STATUSES = new Set([400, 404, 409, 422]);
-const AMBIGUOUS_CREATION_FAILURE_MESSAGE =
-  "予約の結果を確認できませんでした。予約が作成されている可能性があります。再試行する前に予約状況をご確認ください。";
+
+// 曖昧な失敗時(=DEFINITELY_NOT_CREATED_STATUSESに該当しない失敗)は、
+// 「予約状況を確認してください」という、実際にはFrontendから行えない操作を
+// 単独で案内しない。何が分かっていて何ができないかを具体的に示す
+// AmbiguousFailureNotice(下のJSX内)で案内する。
+
+// 支払い確認画面(/reserve/:id/confirm)は別ルートとして扱うが、入力内容の
+// state自体はページ遷移(unmount)で失われるため、ブラウザの戻る操作で
+// 予約フォームに戻った際に入力内容を復元できるようsessionStorageにも
+// 一時保存する(予約作成成功時にclearDraftで消す)。
+const DRAFT_KEY_PREFIX = "traildrop_reserve_draft_";
+
+function loadDraft(id) {
+  try {
+    const raw = sessionStorage.getItem(DRAFT_KEY_PREFIX + id);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveDraft(id, draft) {
+  try {
+    sessionStorage.setItem(DRAFT_KEY_PREFIX + id, JSON.stringify(draft));
+  } catch {
+    // 保存できなくても致命的ではない(戻った際に入力内容が復元されないだけ)。
+  }
+}
+
+function clearDraft(id) {
+  try {
+    sessionStorage.removeItem(DRAFT_KEY_PREFIX + id);
+  } catch {
+    // ignore
+  }
+}
 
 export default function Reservation() {
   const { id } = useParams();
@@ -41,15 +75,23 @@ export default function Reservation() {
   // (誤ってこちらを使うと、下のearly returnで画面全体がエラー文言だけに
   // なってしまう)。
   const [error, setError] = useState(null);
-  const [name, setName] = useState("");
-  const [date, setDate] = useState("");
-  const [paymentMethod, setPaymentMethod] = useState("");
+  // 「予約情報入力」の後に「支払い確認」を挟む。/reserve/:id/confirmという
+  // 別ルートとして扱うことで、ブラウザの戻る操作でも正しく/reserve/:idへ
+  // 戻れるようにする(以前はコンポーネント内stateだけで切り替えており、
+  // 戻る操作がこのステップを経由せず一覧まで戻ってしまっていた)。
+  const isConfirmStep = location.pathname.endsWith("/confirm");
+  // 確認画面への遷移時にlocation.stateへ入力内容を積むが、リロードで
+  // location.stateは失われるため、sessionStorageのdraftをフォールバックに
+  // 使う(戻った際の入力内容復元にも同じdraftを使う)。
+  const [name, setName] = useState(() => location.state?.name ?? loadDraft(id)?.name ?? "");
+  const [date, setDate] = useState(() => location.state?.date ?? loadDraft(id)?.date ?? "");
+  const [paymentMethod, setPaymentMethod] = useState(
+    () => location.state?.paymentMethod ?? loadDraft(id)?.paymentMethod ?? "",
+  );
   const [formError, setFormError] = useState(null);
-  // 「予約情報入力」の後に「支払い確認」を挟む(このコンポーネント内の
-  // インライン確認ステップとして。新しい画面遷移は増やさない)。confirming
-  // がtrueの間は入力内容を確定として扱い、実際のAPI呼び出しはconfirmボタン
-  // を押したときだけ行う。
-  const [confirming, setConfirming] = useState(false);
+  // 予約作成が成功したか判断できない「曖昧な失敗」の場合だけ専用の警告を
+  // 表示する(「再試行すれば安全」と誤解させる表示にしないため)。
+  const [ambiguousFailure, setAmbiguousFailure] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
@@ -81,6 +123,18 @@ export default function Reservation() {
     return () => (mounted = false);
   }, [id]);
 
+  // /reserve/:id/confirmへ直接アクセス・リロードした場合など、確認に必要な
+  // 入力内容(location.state・draftのどちらにも無い)が無ければ、確認画面を
+  // 空のまま表示せず入力画面へ戻す。
+  useEffect(() => {
+    if (!item || !isConfirmStep) return;
+    const missingRequired = !name.trim() || !paymentMethod || (item.requiresDate && !date);
+    if (missingRequired) {
+      navigate(`/reserve/${id}`, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [item, isConfirmStep]);
+
   if (loading) return <div className="p-4">読み込み中…</div>;
   if (error) return <div className="p-4 text-red-600">{error}</div>;
   if (!item) return <div className="p-4">指定された商品が見つかりません。</div>;
@@ -100,7 +154,10 @@ export default function Reservation() {
       return;
     }
     setFormError(null);
-    setConfirming(true);
+    saveDraft(id, { name, date, paymentMethod });
+    navigate(`/reserve/${id}/confirm`, {
+      state: { name, date, paymentMethod, routeOrigin, routeDestination, routePassPoint },
+    });
   }
 
   async function handleConfirmPayment() {
@@ -110,6 +167,7 @@ export default function Reservation() {
 
     setSubmitting(true);
     setFormError(null);
+    setAmbiguousFailure(false);
     try {
       const requestedAt = item.requiresDate ? `${date}:00+09:00` : null;
       // 実際の外部決済は一切行わない。ここでの成功=モック決済成功として
@@ -121,6 +179,7 @@ export default function Reservation() {
         requested_at: requestedAt,
         payment_method: paymentMethod,
       });
+      clearDraft(id);
       if (res?.access_token) {
         sessionStorage.setItem(`traildrop_access_token_${res.id}`, res.access_token);
       }
@@ -151,13 +210,13 @@ export default function Reservation() {
         },
       });
     } catch (e) {
-      // エラー時もconfirming(支払い確認画面)は維持し、name/date/
+      // エラー時も確認画面(/reserve/:id/confirm)は維持し、name/date/
       // paymentMethodのstateも一切触らない。入力し直さずそのまま
-      // 「支払いを確定する」を再度押せば再試行できる。
-      const msg = DEFINITELY_NOT_CREATED_STATUSES.has(e?.status)
-        ? e.message || "予約に失敗しました"
-        : AMBIGUOUS_CREATION_FAILURE_MESSAGE;
-      setFormError(msg);
+      // 「支払いを確定する」を再度押せば再試行できる(ただし曖昧な失敗時は
+      // 二重予約の恐れを警告表示し、安易な再試行を促さない)。
+      const definitelyNotCreated = DEFINITELY_NOT_CREATED_STATUSES.has(e?.status);
+      setAmbiguousFailure(!definitelyNotCreated);
+      setFormError(definitelyNotCreated ? e.message || "予約に失敗しました" : null);
     } finally {
       setSubmitting(false);
     }
@@ -172,7 +231,7 @@ export default function Reservation() {
         <div className="text-sm">場所: {item.location}</div>
       </header>
 
-      {!confirming ? (
+      {!isConfirmStep ? (
         <form onSubmit={handleProceedToConfirm} className="space-y-3">
           <div className="text-lg font-bold">¥{item.price}</div>
           {item.requiresDate && (
@@ -249,15 +308,28 @@ export default function Reservation() {
             </p>
           </div>
 
+          {ambiguousFailure && (
+            <div
+              className="rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900"
+              role="alert"
+            >
+              <p className="font-semibold">予約が完了したかどうか、この画面では確認できません</p>
+              <ul className="mt-2 list-disc space-y-1 pl-5">
+                <li>通信状況により、予約が作成されたかどうかをこの画面では判断できませんでした。</li>
+                <li>
+                  同じ内容でお支払いをすぐに再試行すると、二重に予約されるおそれがあります。むやみに再試行しないでください。
+                </li>
+                <li>現時点では、この画面から予約状況をご自身で確認する機能はありません。</li>
+                <li>ご不安な場合は、受取窓口（{item.location}）で予約状況をご確認ください。</li>
+              </ul>
+            </div>
+          )}
           {formError && <div className="text-red-600">{formError}</div>}
 
           <div className="flex gap-2">
             <button
               type="button"
-              onClick={() => {
-                setConfirming(false);
-                setFormError(null);
-              }}
+              onClick={() => navigate(-1)}
               disabled={submitting}
               className="flex-1 px-4 py-2 bg-gray-200 rounded disabled:opacity-50"
             >
