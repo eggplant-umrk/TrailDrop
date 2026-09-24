@@ -185,6 +185,12 @@ def store_route_analysis_cache(key: tuple[str, str, float], response: RouteAnaly
         _route_analysis_cache[key] = (time.monotonic(), response)
 
 
+# 実決済は行わないモック決済。フロントで選べる方法をここで一元管理し、
+# create_reservation()側でPydanticのバリデーション(422)ではなくここで
+# 明示的に400として弾く。
+VALID_PAYMENT_METHODS = {"paypay", "credit_card"}
+
+
 def reservation_error(exc: Exception) -> HTTPException:
     code = getattr(exc, "code", "")
     message = getattr(exc, "message", str(exc))
@@ -192,6 +198,11 @@ def reservation_error(exc: Exception) -> HTTPException:
         return HTTPException(status_code=422, detail="Experience date is required")
     if "REQUESTED_AT_IN_PAST" in message:
         return HTTPException(status_code=422, detail="Requested date must be in the future")
+    # RPC側でもpayment_methodを再検証している(defense in depth)。通常は
+    # create_reservation()のVALID_PAYMENT_METHODSチェックで先に400になる
+    # ため、ここに到達するのはRPCを直接叩いた場合などの想定外経路のみ。
+    if "INVALID_PAYMENT_METHOD" in message:
+        return HTTPException(status_code=400, detail="Invalid payment method")
     if code == "P0002" or "ITEM_NOT_FOUND" in message:
         return HTTPException(status_code=404, detail="Item not found")
     if code == "P0001" or "OUT_OF_STOCK" in message:
@@ -239,6 +250,10 @@ def list_items():
 
 @app.post("/reservations", response_model=ReservationCreateResponse, status_code=201)
 def create_reservation(reservation: ReservationCreate):
+    # 未指定・不正な値のどちらも同じ400として扱う(PayPay/クレジットカード
+    # のどちらかを必須選択、という仕様に対して一貫したエラーにするため)。
+    if reservation.payment_method not in VALID_PAYMENT_METHODS:
+        raise HTTPException(status_code=400, detail="Invalid payment method")
     try:
         response = (
             get_supabase()
@@ -252,6 +267,7 @@ def create_reservation(reservation: ReservationCreate):
                         if reservation.requested_at is not None
                         else None
                     ),
+                    "p_payment_method": reservation.payment_method,
                 },
             )
             .execute()

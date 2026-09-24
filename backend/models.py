@@ -19,10 +19,15 @@ class Item(BaseModel):
     pickup_available_to: time | None = None
 
 
+# payment_methodは意図的にLiteral/enumにしていない。不正な値をpydanticの
+# バリデーションエラー(422)にはせず、main.pyのcreate_reservation()内で
+# VALID_PAYMENT_METHODSと突き合わせて400として扱うため(未指定もここでは
+# 許可しておき、endpoint側で「未指定も不正」として同じ400にまとめる)。
 class ReservationCreate(BaseModel):
     item_id: UUID
     user_name: str
     requested_at: datetime | None = None
+    payment_method: str | None = None
 
     @field_validator("requested_at")
     @classmethod
@@ -42,6 +47,13 @@ class ReservationResponse(BaseModel):
     status: str
     requested_at: datetime | None = None
     reserved_at: datetime | None = None
+    # payment_method/payment_statusは予約のstatus(pending/completed/cancelled)
+    # とは別の関心事(支払い方法のモックと、その決済状態)。両方とも
+    # reservationsテーブルの実カラムで、Noneは「この予約が作られた時点では
+    # 支払い情報を持っていなかった」(cancellation migration以前の既存予約)
+    # ことを表す。
+    payment_method: str | None = None
+    payment_status: str | None = None
 
 
 class ReservationCreateResponse(ReservationResponse):

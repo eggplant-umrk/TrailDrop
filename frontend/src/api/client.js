@@ -2,6 +2,9 @@ const BASE = import.meta.env.VITE_API_BASE_URL || "";
 const DEMO_MODE = import.meta.env.VITE_DEMO_MODE === "true";
 const ROUTE_ANALYSIS_CLIENT_KEY = import.meta.env.VITE_ROUTE_ANALYSIS_CLIENT_KEY || "";
 
+// main.pyのVALID_PAYMENT_METHODSと合わせる。実決済は行わないモック決済。
+const VALID_PAYMENT_METHODS = new Set(["paypay", "credit_card"]);
+
 function errorMessage(json, status) {
   const detail = json?.detail;
   if (typeof detail === "string") return detail;
@@ -83,7 +86,21 @@ export async function getItems() {
   return await request(`/items`, { method: "GET" });
 }
 
-export async function createReservation({ item_id, user_name, requested_at = null }) {
+export async function createReservation({
+  item_id,
+  user_name,
+  requested_at = null,
+  payment_method = null,
+}) {
+  // 本番Backend(main.pyのcreate_reservation)と同じ「未指定・不正はどちらも
+  // 400」という扱いを、DEMO_MODEでも先に行う。実際の決済処理はどちらの
+  // モードでも一切行わない(モック決済)。
+  if (!VALID_PAYMENT_METHODS.has(payment_method)) {
+    const err = new Error("Invalid payment method");
+    err.status = 400;
+    throw err;
+  }
+
   if (DEMO_MODE) {
     // Demo mode: persist reservations in sessionStorage so they survive reloads
     const now = new Date().toISOString();
@@ -99,6 +116,10 @@ export async function createReservation({ item_id, user_name, requested_at = nul
       status: "pending",
       requested_at,
       reserved_at: now,
+      payment_method,
+      // 本番のcreate_reservation_with_stock RPCと同じく、モック決済は
+      // 予約作成と同時に即時「成功」扱いにする(中間状態を残さない)。
+      payment_status: "paid",
     };
 
     try {
@@ -115,7 +136,7 @@ export async function createReservation({ item_id, user_name, requested_at = nul
   return await request(`/reservations`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ item_id, user_name, requested_at }),
+    body: JSON.stringify({ item_id, user_name, requested_at, payment_method }),
   });
 }
 
@@ -184,6 +205,11 @@ export async function cancelReservation(reservationId, reservationToken) {
         throw err;
       }
       res.status = "cancelled";
+      // 本番のcancel_reservation_with_stock RPCと同じく、payment_statusが
+      // "paid"の場合だけ"cancelled"にする("pending"はそのまま)。
+      if (res.payment_status === "paid") {
+        res.payment_status = "cancelled";
+      }
       map[reservationId] = res;
       sessionStorage.setItem("demo_reservations", JSON.stringify(map));
       const { access_token: _accessToken, ...response } = res;

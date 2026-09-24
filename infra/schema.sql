@@ -32,6 +32,13 @@ create table if not exists public.reservations (
 alter table public.reservations
     add column if not exists requested_at timestamptz;
 
+-- Mock payment method/status (no real payment gateway). Nullable/'pending'
+-- default so existing reservations that predate this feature aren't
+-- misrepresented as having a known method or a real payment.
+alter table public.reservations
+    add column if not exists payment_method varchar,
+    add column if not exists payment_status varchar not null default 'pending';
+
 -- Apply the tightened constraints when this script runs against an existing project.
 update public.reservations
 set qr_token = gen_random_uuid()
@@ -97,6 +104,28 @@ begin
             add constraint reservations_status_check
             check (status in ('pending', 'completed', 'cancelled'));
     end if;
+
+    if not exists (
+        select 1
+        from pg_constraint
+        where conname = 'reservations_payment_method_check'
+          and conrelid = 'public.reservations'::regclass
+    ) then
+        alter table public.reservations
+            add constraint reservations_payment_method_check
+            check (payment_method is null or payment_method in ('paypay', 'credit_card'));
+    end if;
+
+    if not exists (
+        select 1
+        from pg_constraint
+        where conname = 'reservations_payment_status_check'
+          and conrelid = 'public.reservations'::regclass
+    ) then
+        alter table public.reservations
+            add constraint reservations_payment_status_check
+            check (payment_status in ('pending', 'paid', 'cancelled'));
+    end if;
 end
 $$;
 
@@ -117,11 +146,18 @@ grant select, update on table public.items to service_role;
 grant select, insert, update on table public.reservations to service_role;
 
 drop function if exists public.create_reservation_with_stock(uuid, varchar);
+drop function if exists public.create_reservation_with_stock(uuid, varchar, timestamptz);
 
+-- payment_method is validated both here (defense in depth) and, primarily,
+-- by the Backend's create_reservation() before this RPC is ever called.
+-- payment_status is always 'paid' on a successful insert: there is no real
+-- payment gateway, so the mock payment "succeeds" synchronously with stock
+-- decrement, atomically, in this same transaction.
 create or replace function public.create_reservation_with_stock(
     p_item_id uuid,
     p_user_name varchar,
-    p_requested_at timestamptz default null
+    p_requested_at timestamptz default null,
+    p_payment_method varchar default null
 )
 returns setof public.reservations
 language plpgsql
@@ -132,6 +168,10 @@ declare
     created_reservation public.reservations;
     item_type varchar;
 begin
+    if p_payment_method is null or p_payment_method not in ('paypay', 'credit_card') then
+        raise exception 'INVALID_PAYMENT_METHOD' using errcode = '22023';
+    end if;
+
     update public.items
     set stock = stock - 1
     where id = p_item_id
@@ -153,11 +193,13 @@ begin
         raise exception 'REQUESTED_AT_IN_PAST' using errcode = '22023';
     end if;
 
-    insert into public.reservations (item_id, user_name, requested_at)
+    insert into public.reservations (item_id, user_name, requested_at, payment_method, payment_status)
     values (
         p_item_id,
         p_user_name,
-        case when item_type = 'experience' then p_requested_at else null end
+        case when item_type = 'experience' then p_requested_at else null end,
+        p_payment_method,
+        'paid'
     )
     returning * into created_reservation;
 
@@ -165,9 +207,9 @@ begin
 end;
 $$;
 
-revoke all on function public.create_reservation_with_stock(uuid, varchar, timestamptz)
+revoke all on function public.create_reservation_with_stock(uuid, varchar, timestamptz, varchar)
 from public, anon, authenticated;
-grant execute on function public.create_reservation_with_stock(uuid, varchar, timestamptz)
+grant execute on function public.create_reservation_with_stock(uuid, varchar, timestamptz, varchar)
 to service_role;
 
 -- Cancels a pending reservation and returns one unit of stock to its item,
@@ -178,6 +220,11 @@ to service_role;
 -- concurrent cancel calls for the same reservation cannot both observe
 -- 'pending' and both return stock: the second call blocks until the first
 -- commits, then sees the already-cancelled status and is rejected.
+--
+-- The same UPDATE also moves payment_status from 'paid' to 'cancelled'
+-- (leaving 'pending' payment_status alone) -- one statement, one
+-- transaction, so cancellation and the payment_status change can't happen
+-- separately or only one of the two.
 create or replace function public.cancel_reservation_with_stock(
     p_reservation_id uuid,
     p_access_token uuid
@@ -205,8 +252,11 @@ begin
         raise exception 'RESERVATION_NOT_CANCELLABLE' using errcode = 'P0004';
     end if;
 
+    -- payment_statusが'paid'(モック決済成功済み)なら'cancelled'にする。
+    -- 'pending'(支払い機能追加以前の既存予約など)はそのまま変更しない。
     update public.reservations
-    set status = 'cancelled'
+    set status = 'cancelled',
+        payment_status = case when payment_status = 'paid' then 'cancelled' else payment_status end
     where id = p_reservation_id
       and access_token = p_access_token
       and status = 'pending'
