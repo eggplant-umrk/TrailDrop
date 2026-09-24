@@ -67,8 +67,10 @@ class FakeSupabase:
     def __init__(self, reservations, items):
         self.reservations = reservations  # dict[str, dict]
         self.items = items  # dict[str, dict] (id -> {"stock": int})
+        self.rpc_call_count = 0
 
     def rpc(self, name, params):
+        self.rpc_call_count += 1
         if name == "cancel_reservation_with_stock":
             return FakeRpcCall(self._cancel_reservation_with_stock, params)
         raise NotImplementedError(f"unexpected RPC: {name}")
@@ -215,3 +217,25 @@ class TestCancelReservation:
 
         assert response.status_code == 404
         assert response.json()["detail"] == "Reservation not found"
+        assert fake_supabase.rpc_call_count == 0
+
+    @pytest.mark.parametrize(
+        "invalid_token",
+        ["not-a-uuid", "12345", "11111111-1111-1111-1111-11111111111"],
+    )
+    def test_invalid_access_token_returns_404_without_hitting_the_rpc(
+        self, client, fake_supabase, invalid_token
+    ):
+        # PM review MINOR m1': same treatment for a malformed
+        # X-Reservation-Token as for a malformed reservation_id -- 404
+        # "Reservation not found" without ever reaching the RPC (and thus
+        # without a raw Postgres 22P02 leaking through).
+        reservation = make_reservation()
+        fake_supabase.reservations[reservation["id"]] = reservation
+
+        response = cancel(client, reservation["id"], invalid_token)
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Reservation not found"
+        assert fake_supabase.rpc_call_count == 0
+        assert fake_supabase.reservations[reservation["id"]]["status"] == "pending"

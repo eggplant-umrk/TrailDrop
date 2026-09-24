@@ -7,6 +7,12 @@ an in-memory fake, here reproducing the small slice of the supabase-py
 table query builder (`.table(...).select(...)/.update(...).eq(...).eq(...)
 .limit(...).execute()`) that verify_qr() actually uses.
 
+Also covers the select-then-update race fallback (a concurrent request
+cancels the reservation between verify_qr()'s initial status lookup and its
+conditional UPDATE): FakeSupabase.race lets a test inject that status change
+at the exact point the UPDATE's WHERE filtering runs, so it legitimately
+matches 0 rows the way the real conditional UPDATE would.
+
 DEMO_MODE's equivalent guard (frontend/src/api/client.js verifyQr) is JS
 that runs in the browser and isn't exercised by this Python suite; it was
 verified manually in the browser instead (see the PR description).
@@ -38,8 +44,9 @@ class FakeReservationsTable:
     real Postgrest client serializes them).
     """
 
-    def __init__(self, reservations):
-        self.reservations = reservations
+    def __init__(self, supabase):
+        self.supabase = supabase
+        self.reservations = supabase.reservations
         self._update_values = None
         self._filters = []
 
@@ -58,6 +65,21 @@ class FakeReservationsTable:
         return self
 
     def execute(self):
+        if self._update_values is not None:
+            # Simulates another request changing the row's status between
+            # verify_qr()'s initial SELECT and this UPDATE (see
+            # FakeSupabase.race / test_select_update_race_falls_back_to_...
+            # below). Applied at most once, right before this UPDATE's own
+            # WHERE filtering runs, so a status="pending" filter here
+            # legitimately matches 0 rows -- exactly like the real
+            # conditional UPDATE would if the row changed underneath it.
+            race = self.supabase.race
+            if race is not None:
+                target = self.reservations.get(race["reservation_id"])
+                if target is not None:
+                    target["status"] = race["new_status"]
+                self.supabase.race = None
+
         matches = [
             r
             for r in self.reservations.values()
@@ -72,10 +94,15 @@ class FakeReservationsTable:
 class FakeSupabase:
     def __init__(self, reservations):
         self.reservations = reservations
+        # Set by a test to {"reservation_id": ..., "new_status": ...} to
+        # simulate a concurrent status change landing between verify_qr()'s
+        # initial SELECT and its conditional UPDATE. None (the default)
+        # means no race -- normal sequential behavior.
+        self.race = None
 
     def table(self, name):
         if name == "reservations":
-            return FakeReservationsTable(self.reservations)
+            return FakeReservationsTable(self)
         raise NotImplementedError(name)
 
 
@@ -153,6 +180,27 @@ class TestVerifyQr:
 
         verify(client, reservation["qr_token"])
 
+        assert fake_supabase.reservations[reservation["id"]]["status"] == "cancelled"
+
+    def test_select_update_race_falls_back_to_cancelled_409(self, client, fake_supabase):
+        # PM review MINOR m3': the initial SELECT sees status="pending", but
+        # by the time the conditional UPDATE (.eq("status", "pending")) runs,
+        # another request has already cancelled the reservation, so the
+        # UPDATE matches 0 rows. verify_qr() must then re-check the current
+        # status and report 409 "Reservation is cancelled" -- not silently
+        # treat 0 rows updated as "already completed", and never complete
+        # the handoff.
+        reservation = make_reservation(status="pending")
+        fake_supabase.reservations[reservation["id"]] = reservation
+        fake_supabase.race = {
+            "reservation_id": reservation["id"],
+            "new_status": "cancelled",
+        }
+
+        response = verify(client, reservation["qr_token"])
+
+        assert response.status_code == 409
+        assert response.json()["detail"] == "Reservation is cancelled"
         assert fake_supabase.reservations[reservation["id"]]["status"] == "cancelled"
 
     def test_unknown_qr_token_returns_404(self, client, fake_supabase):

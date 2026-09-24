@@ -214,12 +214,14 @@ def cancel_reservation_error(exc: Exception) -> HTTPException:
     return HTTPException(status_code=502, detail="Failed to cancel reservation")
 
 
-def require_valid_reservation_id(reservation_id: str) -> None:
-    # FastAPIのpath型をUUIDにすると不正な値で422になってしまうため、ここで
-    # 手動検証して404にする(予約不存在と同じ扱いにするため。Postgres側の
-    # 22P02がそのまま漏れるのも防ぐ)。
+def require_valid_uuid(value: str) -> None:
+    # FastAPIのpath/header型をUUIDにすると不正な値で422になってしまうため、
+    # ここで手動検証して404にする(予約不存在と同じ扱いにするため)。
+    # reservation_idだけでなくaccess_token(X-Reservation-Token)も同じ経路で
+    # RPCに渡っており、どちらが不正な形式でもPostgres側の22P02がそのまま
+    # 漏れるのを防ぐ。
     try:
-        UUID(reservation_id)
+        UUID(value)
     except ValueError:
         raise HTTPException(status_code=404, detail="Reservation not found")
 
@@ -298,7 +300,8 @@ def cancel_reservation(
     # (401ではなく)予約の存在自体を推測できないようにする。
     if not x_reservation_token:
         raise HTTPException(status_code=404, detail="Reservation not found")
-    require_valid_reservation_id(reservation_id)
+    require_valid_uuid(reservation_id)
+    require_valid_uuid(x_reservation_token)
     try:
         # status更新と在庫返却はcancel_reservation_with_stock RPC内で1つの
         # トランザクションとして原子的に行う(行ロックにより二重キャンセルでの
