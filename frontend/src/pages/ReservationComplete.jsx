@@ -25,6 +25,13 @@ function buildGoogleMapsUrl({ destination, passPoint }) {
   return `https://www.google.com/maps/dir/?${params.toString()}`;
 }
 
+// Reservation.jsxのPAYMENT_METHODSと合わせる。この画面より前に作られた
+// 予約(payment_methodがNone)は表示自体を出さない(推測で補わない)。
+const PAYMENT_METHOD_LABELS = {
+  paypay: "PayPay",
+  credit_card: "クレジットカード",
+};
+
 // Backend/DBのstatusは'pending'・'completed'・'cancelled'のみ
 // (schema.sqlのcheck制約)。それ以外の値はどれとも扱わず、状態不明として
 // 表示する。
@@ -274,6 +281,11 @@ export default function ReservationComplete() {
         </div>
         {reservation.requested_at && (
           <div className="mb-3">希望日時: {formatRequestedAt(reservation.requested_at)}</div>
+        )}
+        {reservation.payment_method && (
+          <div className="mb-3">
+            支払い方法: {PAYMENT_METHOD_LABELS[reservation.payment_method] || reservation.payment_method}
+          </div>
         )}
         {/* QRは受取前(pending)のみ表示する。受取済み・状態不明の予約でQRを
             提示させないため。案内文は上のstatus表示(description)に一本化し、

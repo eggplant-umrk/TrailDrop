@@ -101,6 +101,12 @@ def make_reservation(**overrides):
         "status": "pending",
         "requested_at": None,
         "reserved_at": "2026-09-24T00:00:00+00:00",
+        # 実予約はcreate_reservation_with_stockが常にpayment_status="paid"
+        # で作る(モック決済)。cancel_reservation_with_stockはpayment_*には
+        # 一切触れない(今回のスコープ外)ので、デフォルトをpaidにしておき、
+        # キャンセル後も変化しないことをテストで確認する。
+        "payment_method": "paypay",
+        "payment_status": "paid",
     }
     data.update(overrides)
     return data
@@ -134,6 +140,25 @@ class TestCancelReservation:
 
         assert response.status_code == 200
         assert response.json()["status"] == "cancelled"
+
+    def test_cancelling_a_paid_reservation_leaves_payment_fields_unchanged(
+        self, client, fake_supabase
+    ):
+        # Regression for the payment-mock feature: cancel_reservation_with_
+        # stock() is unmodified and has no opinion on payment_method/
+        # payment_status, so cancelling a reservation created through the
+        # mock payment flow must still work exactly as before, and the
+        # payment fields it carried in must come back unchanged.
+        reservation = make_reservation(payment_method="credit_card", payment_status="paid")
+        fake_supabase.reservations[reservation["id"]] = reservation
+
+        response = cancel(client, reservation["id"], reservation["access_token"])
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "cancelled"
+        assert body["payment_method"] == "credit_card"
+        assert body["payment_status"] == "paid"
 
     def test_cancelling_returns_one_unit_of_stock(self, client, fake_supabase):
         reservation = make_reservation(item_id="11111111-1111-4111-8111-111111111111")
