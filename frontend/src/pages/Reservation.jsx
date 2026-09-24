@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { useParams, useNavigate, useLocation } from "react-router-dom";
 import api from "../api/client";
+import { saveAccessToken } from "../utils/reservationAccess";
 
 function minimumJapanDateTime() {
   const oneMinuteFromNowInJapan = Date.now() + 9 * 60 * 60 * 1000 + 60 * 1000;
@@ -204,8 +205,12 @@ export default function Reservation() {
         payment_method: paymentMethod,
       });
       clearDraft(id);
+      // access_tokenはタブ単位(sessionStorage)に加え、タブを閉じた後でも同じ
+      // 端末で予約を再表示できるようlocalStorageにも保存する。保存に失敗しても
+      // 例外は投げない(予約は成功しているため、完了画面へはlocation.stateの
+      // access_tokenで必ず遷移させる)。
       if (res?.access_token) {
-        sessionStorage.setItem(`traildrop_access_token_${res.id}`, res.access_token);
+        saveAccessToken(res.id, res.access_token);
       }
 
       const hasRouteContext = Boolean(routeOrigin && routeDestination && routePassPoint);

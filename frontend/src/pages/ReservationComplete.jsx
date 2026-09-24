@@ -2,6 +2,11 @@ import React, { useEffect, useRef, useState } from "react";
 import { useLocation, useParams, useNavigate } from "react-router-dom";
 import { QRCodeCanvas } from "qrcode.react";
 import api from "../api/client";
+import {
+  isAccessTokenPersisted,
+  loadAccessToken,
+  saveAccessToken,
+} from "../utils/reservationAccess";
 
 function formatRequestedAt(value) {
   return new Intl.DateTimeFormat("ja-JP", {
@@ -92,6 +97,9 @@ export default function ReservationComplete() {
   // エラーを表示する。
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState(null);
+  // この端末(localStorage)にaccess_tokenを保存できているか。保存できて
+  // いない場合は、タブを閉じるとQRを再表示できなくなる旨を案内する。
+  const [persisted, setPersisted] = useState(() => isAccessTokenPersisted(id));
   // 更新ボタンを押すたびに増やす。商品名取得effectの依存に含めることで、
   // item_idが変わっていなくても更新のたびに商品名を取り直せるようにする
   // (初回取得が失敗していた場合の再試行手段)。
@@ -119,11 +127,12 @@ export default function ReservationComplete() {
   }, []);
 
   // 予約照会・キャンセルの両方で使う、同じ解決ロジック(state優先、
-  // sessionStorageへフォールバック)を1箇所にまとめる。
+  // sessionStorage→localStorageへフォールバック)を1箇所にまとめる。
+  // localStorageにより、タブを閉じた後や別タブで開いた場合でも、同じ端末
+  // なら予約を再表示できる。
   function getAccessToken() {
     const tokenFromState = location.state?.access_token || null;
-    const tokenFromSession = sessionStorage.getItem(`traildrop_access_token_${id}`);
-    return tokenFromState || tokenFromSession;
+    return tokenFromState || loadAccessToken(id);
   }
 
   async function fetchReservation({ isInitial }) {
@@ -145,6 +154,12 @@ export default function ReservationComplete() {
       const res = await api.getReservation(id, accessToken);
       if (!mountedRef.current) return;
       setReservation(res);
+      // 予約作成直後の保存に失敗していた場合(location.stateのみで到達した
+      // 場合など)に備え、照会に成功したaccess_tokenをこの端末へ保存し直す。
+      // 保存できたかどうかを案内表示に使う。
+      if (accessToken) {
+        setPersisted(saveAccessToken(id, accessToken));
+      }
     } catch (e) {
       if (!mountedRef.current) return;
       if (isInitial) {
@@ -306,6 +321,18 @@ export default function ReservationComplete() {
               <div className="mb-3 text-center">
                 <div className="text-xs text-gray-500">QRが読み取れない場合：</div>
                 <div className="font-mono text-sm break-all">{reservation.qr_token}</div>
+              </div>
+            )}
+
+            {/* 現地でQRを出せなくなる事態を防ぐための再表示の案内。access_token
+                をこの端末に保存できたかどうかで文言を切り替える。 */}
+            {persisted ? (
+              <div className="mb-3 rounded bg-gray-50 p-3 text-xs text-gray-700">
+                この予約はこの端末に保存されています。この画面を閉じても、同じ端末・同じブラウザでこのページを開けばQRコードを再表示できます。念のため、このページをブックマークするか、QRコードのスクリーンショットを保存しておいてください。
+              </div>
+            ) : (
+              <div className="mb-3 rounded border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900" role="alert">
+                この端末に予約情報を保存できませんでした。この画面を閉じるとQRコードを再表示できなくなるため、閉じる前にQRコードのスクリーンショットを保存してください。
               </div>
             )}
 
