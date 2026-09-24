@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useLocation, useParams, useNavigate } from "react-router-dom";
 import { QRCodeCanvas } from "qrcode.react";
 import api from "../api/client";
@@ -51,58 +51,100 @@ export default function ReservationComplete() {
   const location = useLocation();
   const navigate = useNavigate();
   const [reservation, setReservation] = useState(null);
-  // 商品名はGET /itemsの正式な商品データからitem_idで引く。取得できない場合は
-  // 推測で補わず「取得できませんでした」と表示する。
+  // 初回読み込みの失敗は画面全体のエラー表示にする(既存挙動を維持)。
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [initialError, setInitialError] = useState(null);
+  // 「最新の状態に更新」ボタンによる再取得は、初回読み込みとは失敗時の扱いを
+  // 分ける。失敗しても表示中の予約情報・QRはそのまま残し、ボタン付近にだけ
+  // エラーを表示する。
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshError, setRefreshError] = useState(null);
+
+  // 商品名は予約情報の表示とは独立して取得する。取得中・失敗のいずれでも
+  // 予約情報・status・QRの表示は妨げない。取得できない場合は推測で補わず
+  // 「取得できませんでした」と表示する。
   const [itemTitle, setItemTitle] = useState(null);
   const [itemTitleError, setItemTitleError] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  // 「最新の状態に更新」ボタンで予約を再取得するためのカウンタ。
-  const [reloadCount, setReloadCount] = useState(0);
+
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  async function fetchReservation({ isInitial }) {
+    if (isInitial) {
+      setInitialLoading(true);
+      setInitialError(null);
+    } else {
+      setRefreshing(true);
+      setRefreshError(null);
+    }
+
+    try {
+      const tokenFromState = location.state?.access_token || null;
+      const tokenFromSession = sessionStorage.getItem(`traildrop_access_token_${id}`);
+      const accessToken = tokenFromState || tokenFromSession;
+
+      if (!accessToken && import.meta.env.VITE_API_BASE_URL) {
+        throw new Error("予約トークンが見つかりません");
+      }
+
+      const res = await api.getReservation(id, accessToken);
+      if (!mountedRef.current) return;
+      setReservation(res);
+    } catch (e) {
+      if (!mountedRef.current) return;
+      const message = e.message || "予約情報の取得に失敗しました";
+      if (isInitial) {
+        setInitialError(message);
+      } else {
+        setRefreshError(message);
+      }
+    } finally {
+      if (!mountedRef.current) return;
+      if (isInitial) setInitialLoading(false);
+      else setRefreshing(false);
+    }
+  }
 
   useEffect(() => {
+    fetchReservation({ isInitial: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+
+  // 予約のitem_idが分かった時点で商品名を取得する。予約の再取得(初回・更新)
+  // とは別のライフサイクルで動くため、商品名取得の成否が予約表示の
+  // loading/エラー状態に影響しない。
+  useEffect(() => {
+    if (!reservation?.item_id) return;
     let mounted = true;
-    async function load() {
-      setLoading(true);
-      setError(null);
+    setItemTitle(null);
+    setItemTitleError(false);
 
+    async function loadItemTitle() {
       try {
-        const tokenFromState = location.state?.access_token || null;
-        const tokenFromSession = sessionStorage.getItem(`traildrop_access_token_${id}`);
-        const accessToken = tokenFromState || tokenFromSession;
-
-        if (!accessToken && import.meta.env.VITE_API_BASE_URL) {
-          throw new Error("予約トークンが見つかりません");
-        }
-
-        const res = await api.getReservation(id, accessToken);
-        if (!mounted) return;
-        setReservation(res);
-
-        // 商品名の取得失敗は予約表示自体を妨げない。
-        try {
-          const items = await api.getItems();
-          const found = (items || []).find((it) => String(it.id) === String(res.item_id));
-          if (mounted) {
-            setItemTitle(found?.title || null);
-            setItemTitleError(!found?.title);
-          }
-        } catch (e) {
-          if (mounted) {
-            setItemTitle(null);
-            setItemTitleError(true);
-          }
+        const items = await api.getItems();
+        const found = (items || []).find((it) => String(it.id) === String(reservation.item_id));
+        if (mounted) {
+          setItemTitle(found?.title || null);
+          setItemTitleError(!found?.title);
         }
       } catch (e) {
-        if (mounted) setError(e.message || "予約情報の取得に失敗しました");
-      } finally {
-        if (mounted) setLoading(false);
+        if (mounted) {
+          setItemTitle(null);
+          setItemTitleError(true);
+        }
       }
     }
 
-    load();
-    return () => (mounted = false);
-  }, [id, location.state, reloadCount]);
+    loadItemTitle();
+    return () => {
+      mounted = false;
+    };
+  }, [reservation?.item_id]);
 
   // RouteTest経由で予約した場合のみ、Google Maps引き継ぎに使う経路情報を持つ。
   // ItemListから直接予約した場合や、stateを保持しないリロード直後は
@@ -130,11 +172,11 @@ export default function ReservationComplete() {
     }
   }
 
-  if (loading) return <div className="p-4">読み込み中…</div>;
-  if (error)
+  if (initialLoading) return <div className="p-4">読み込み中…</div>;
+  if (initialError)
     return (
       <div className="p-4">
-        <div className="text-red-600 mb-3">{error}</div>
+        <div className="text-red-600 mb-3">{initialError}</div>
         <div className="flex space-x-2">
           <button onClick={() => navigate('/')} className="px-3 py-1 bg-[#2f6f3e] text-white rounded">一覧へ戻る</button>
           <button onClick={() => navigate(-1)} className="px-3 py-1 bg-gray-200 rounded">前のページへ戻る</button>
@@ -169,7 +211,8 @@ export default function ReservationComplete() {
           <div className="mb-3">希望日時: {formatRequestedAt(reservation.requested_at)}</div>
         )}
         {/* QRは受取前(pending)のみ表示する。受取済み・状態不明の予約でQRを
-            提示させないため。 */}
+            提示させないため。案内文は上のstatus表示(description)に一本化し、
+            ここでは重複させない。 */}
         {isPending && (
           <>
             <div className="flex justify-center my-3">
@@ -185,17 +228,25 @@ export default function ReservationComplete() {
                 <div className="font-mono text-sm break-all">{reservation.qr_token}</div>
               </div>
             )}
-            <div className="text-xs text-gray-500">この画面を現地スタッフに提示してください。</div>
           </>
         )}
 
         <button
           type="button"
-          onClick={() => setReloadCount((count) => count + 1)}
-          className="mt-4 w-full rounded px-4 py-2 text-sm bg-gray-200"
+          onClick={() => fetchReservation({ isInitial: false })}
+          disabled={refreshing}
+          aria-busy={refreshing}
+          className={`mt-4 w-full rounded px-4 py-2 text-sm ${
+            refreshing ? "bg-gray-100 text-gray-400" : "bg-gray-200"
+          }`}
         >
-          最新の状態に更新
+          {refreshing ? "更新中…" : "最新の状態に更新"}
         </button>
+        {refreshError && (
+          <p className="mt-2 text-sm text-red-600" role="alert">
+            {refreshError}（表示中の予約情報は変更していません）
+          </p>
+        )}
 
         {routeContext && (
           <div className="mt-4">
