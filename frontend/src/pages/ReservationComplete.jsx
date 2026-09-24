@@ -46,6 +46,12 @@ const UNKNOWN_STATUS_DISPLAY = {
   className: "bg-gray-100 text-gray-700",
 };
 
+// 更新ボタンの再取得失敗は、fetchやHTTPの生のエラー文言(英語になり得る)を
+// そのまま出さず、常にこの固定文言を表示する。初回読み込みの失敗(initialError)
+// はこれまで通りe.messageを表示する。
+const REFRESH_ERROR_MESSAGE =
+  "最新の状態を取得できませんでした。通信環境を確認して再度お試しください。";
+
 export default function ReservationComplete() {
   const { id } = useParams();
   const location = useLocation();
@@ -59,6 +65,10 @@ export default function ReservationComplete() {
   // エラーを表示する。
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState(null);
+  // 更新ボタンを押すたびに増やす。商品名取得effectの依存に含めることで、
+  // item_idが変わっていなくても更新のたびに商品名を取り直せるようにする
+  // (初回取得が失敗していた場合の再試行手段)。
+  const [itemReloadKey, setItemReloadKey] = useState(0);
 
   // 商品名は予約情報の表示とは独立して取得する。取得中・失敗のいずれでも
   // 予約情報・status・QRの表示は妨げない。取得できない場合は推測で補わず
@@ -97,11 +107,10 @@ export default function ReservationComplete() {
       setReservation(res);
     } catch (e) {
       if (!mountedRef.current) return;
-      const message = e.message || "予約情報の取得に失敗しました";
       if (isInitial) {
-        setInitialError(message);
+        setInitialError(e.message || "予約情報の取得に失敗しました");
       } else {
-        setRefreshError(message);
+        setRefreshError(REFRESH_ERROR_MESSAGE);
       }
     } finally {
       if (!mountedRef.current) return;
@@ -117,7 +126,9 @@ export default function ReservationComplete() {
 
   // 予約のitem_idが分かった時点で商品名を取得する。予約の再取得(初回・更新)
   // とは別のライフサイクルで動くため、商品名取得の成否が予約表示の
-  // loading/エラー状態に影響しない。
+  // loading/エラー状態に影響しない。itemReloadKeyを依存に含めることで、
+  // item_idが変わらない更新操作でも商品名を取り直せる(初回取得の失敗を
+  // 更新ボタンでリトライできるようにするため)。
   useEffect(() => {
     if (!reservation?.item_id) return;
     let mounted = true;
@@ -144,7 +155,7 @@ export default function ReservationComplete() {
     return () => {
       mounted = false;
     };
-  }, [reservation?.item_id]);
+  }, [reservation?.item_id, itemReloadKey]);
 
   // RouteTest経由で予約した場合のみ、Google Maps引き継ぎに使う経路情報を持つ。
   // ItemListから直接予約した場合や、stateを保持しないリロード直後は
@@ -233,7 +244,10 @@ export default function ReservationComplete() {
 
         <button
           type="button"
-          onClick={() => fetchReservation({ isInitial: false })}
+          onClick={() => {
+            fetchReservation({ isInitial: false });
+            setItemReloadKey((count) => count + 1);
+          }}
           disabled={refreshing}
           aria-busy={refreshing}
           className={`mt-4 w-full rounded px-4 py-2 text-sm ${
