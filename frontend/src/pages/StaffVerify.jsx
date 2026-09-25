@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import api from "../api/client";
+import QrScanner from "../components/QrScanner";
 import { toUserMessage } from "../utils/errorMessages";
 
 // 同一セッション内でスタッフトークンの再入力を不要にする(一括修正m8)。
@@ -178,6 +179,11 @@ export default function StaffVerify() {
   // 受取完了した予約の商品名。GET /itemsの正式な商品データからitem_idで引き、
   // 取得できない場合は推測せず取得失敗として表示する。
   const [itemTitle, setItemTitle] = useState(null);
+  // カメラでのQR読み取りUIの表示状態。手入力方式とは併用できる。
+  const [scanning, setScanning] = useState(false);
+  // 受取確認の二重送信防止。loading stateは非同期に反映されるため、
+  // 読み取り直後の連続通知などでも確実に1回だけAPIを呼ぶようrefで判定する。
+  const verifyingRef = useRef(false);
 
   // 予約情報の確認(読み取り専用、GET /staff/reservations/{id})用の状態。
   // 受取確認(QR検証、上のstate)とは完全に独立させ、どちらの操作も互いに
@@ -222,12 +228,13 @@ export default function StaffVerify() {
     }
   }
 
-  async function handleSubmit(event) {
-    event.preventDefault();
-    if (!staffToken.trim() || !qrToken.trim()) {
+  async function verify(token) {
+    if (!staffToken.trim() || !token.trim()) {
       setError({ status: null, message: "スタッフトークンとQRトークンを入力してください。" });
       return;
     }
+    if (verifyingRef.current) return;
+    verifyingRef.current = true;
 
     setLoading(true);
     setError(null);
@@ -235,7 +242,7 @@ export default function StaffVerify() {
     setItemTitle(null);
 
     try {
-      const response = await api.verifyQr(qrToken.trim(), staffToken);
+      const response = await api.verifyQr(token.trim(), staffToken);
       setQrToken("");
       // 商品名の取得失敗は受取完了の表示を妨げない。
       let title = null;
@@ -255,8 +262,29 @@ export default function StaffVerify() {
         message: resolveErrorMessage(requestError),
       });
     } finally {
+      verifyingRef.current = false;
       setLoading(false);
     }
+  }
+
+  function handleSubmit(event) {
+    event.preventDefault();
+    verify(qrToken);
+  }
+
+  function handleStartScan() {
+    setError(null);
+    setResult(null);
+    setScanning(true);
+  }
+
+  // 読み取り成功時: 手入力欄にはセットせず、そのまま受取確認へ進む。
+  // 404/409/通信エラーなどでverifyが失敗してもQRトークンを画面に残さない
+  // ため。QrScannerは1回読み取った時点でカメラを止めるため、同じQRを
+  // 映し続けてもここは1度しか呼ばれない。
+  function handleScanDetected(value) {
+    setScanning(false);
+    verify(value);
   }
 
   async function handleLookupSubmit(event) {
@@ -313,8 +341,29 @@ export default function StaffVerify() {
             />
           </label>
 
+          <div className="space-y-2">
+            {scanning ? (
+              <QrScanner onDetected={handleScanDetected} onCancel={() => setScanning(false)} />
+            ) : (
+              <button
+                type="button"
+                onClick={handleStartScan}
+                disabled={loading || !staffToken.trim()}
+                className={`w-full rounded px-4 py-3 font-medium text-white ${
+                  loading || !staffToken.trim() ? "bg-gray-400" : "bg-[#2f6f3e]"
+                }`}
+              >
+                QRコードをスキャン
+              </button>
+            )}
+            <p className="text-xs text-gray-500">
+              {!staffToken.trim() && !scanning && "スタッフトークンを入力するとスキャンできます。"}
+              カメラ読み取りはHTTPSで開いた画面でのみ利用できます。カメラが使えない場合は、下の欄にQRトークンを手入力してください。
+            </p>
+          </div>
+
           <label className="block">
-            <span className="text-sm font-medium">QRトークン</span>
+            <span className="text-sm font-medium">QRトークン（手入力）</span>
             <input
               type="text"
               value={qrToken}
