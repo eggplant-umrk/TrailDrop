@@ -25,7 +25,7 @@ const CREATE_ERROR_BY_DETAIL = {
   "Requested date must be in the future": "希望日時は現在より後の日時を指定してください。",
   "Invalid payment method": "支払い方法を選び直してください。",
   "Pickup window is invalid":
-    "受取時間帯が正しくありません。お手数ですが、もう一度ルート分析からやり直してください。",
+    "受取時間帯が正しくありません。お手数ですが、もう一度検索からやり直してください。",
 };
 const CREATE_ERROR_BY_STATUS = {
   400: "入力内容が正しくありません。",
@@ -36,7 +36,7 @@ const CREATE_ERROR_BY_STATUS = {
 const CREATE_ERROR_FALLBACK = "予約に失敗しました。";
 
 const PICKUP_WINDOW_ENDED_MESSAGE =
-  "受取時間帯が終了しています。お手数ですが、もう一度ルート分析からやり直してください。";
+  "受取時間帯が終了しています。お手数ですが、もう一度検索からやり直してください。";
 // setTimeoutの遅延上限(約24.8日)。これを超える先の終了時刻は、上限で一度
 // 起きてから再計算する。
 const MAX_TIMEOUT_MS = 2 ** 31 - 1;
@@ -588,8 +588,10 @@ export default function Reservation() {
             </div>
           ))}
         </dl>
+        {/* 「…発生しませ/ん。」のような改行を避けるため、文単位で折り返す。 */}
         <p className="mt-2 text-xs text-gray-500">
-          これはデモ用のモック決済です。実際の支払いは発生しません。
+          <span className="inline-block">これはデモ用のモック決済です。</span>
+          <span className="inline-block">実際の支払いは発生しません。</span>
         </p>
       </section>
 

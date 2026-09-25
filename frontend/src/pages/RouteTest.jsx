@@ -587,8 +587,12 @@ export default function RouteTest() {
                 )}
                 <p className="mt-2 text-xs text-gray-500">
                   到着目安は寄り道時間を含みません
-                  {formatDistanceFromRoute(selectedPickup.distance_from_route_meters) &&
-                    `（受取地点は${formatDistanceFromRoute(selectedPickup.distance_from_route_meters)}）`}
+                  {/* 括弧内の「い）」だけが改行されないよう、括弧ごと折り返す。 */}
+                  {formatDistanceFromRoute(selectedPickup.distance_from_route_meters) && (
+                    <span className="inline-block">
+                      （受取地点は{formatDistanceFromRoute(selectedPickup.distance_from_route_meters)}）
+                    </span>
+                  )}
                 </p>
                 {isPickupWindowExpired && (
                   <p className="mt-2 text-sm text-red-600" role="alert">

@@ -494,8 +494,15 @@ export default function ReservationComplete() {
           {/* 現地でQRを出せなくなる事態を防ぐための再表示の案内。access_token
               をこの端末に保存できたかどうかで文言を切り替える。 */}
           {persisted ? (
+            // 文の途中で1〜2文字だけ改行されないよう、文単位で折り返す。
             <p className="mt-3 rounded-lg bg-white p-3 text-xs text-gray-600">
-              この予約はこの端末に保存されています。この画面を閉じても、同じ端末・同じブラウザでこのページを開けばQRコードを再表示できます。念のため、このページをブックマークするか、QRコードのスクリーンショットを保存しておいてください。
+              <span className="inline-block">この予約はこの端末に保存されています。</span>
+              <span className="inline-block">
+                この画面を閉じても、同じ端末・同じブラウザでこのページを開けばQRコードを再表示できます。
+              </span>
+              <span className="inline-block">
+                念のため、このページをブックマークするか、QRコードのスクリーンショットを保存しておいてください。
+              </span>
             </p>
           ) : (
             <p
@@ -560,12 +567,14 @@ export default function ReservationComplete() {
           <div className="mt-2 rounded-lg border border-red-200 bg-white p-3">
             <p className="text-sm text-red-700">本当にキャンセルしますか？</p>
             <div className="mt-2 flex gap-2">
+              {/* 2等分だとスマホ幅で「はい、キャンセルす/る」と改行されるため、
+                  短い「いいえ」より広く取る。 */}
               <button
                 type="button"
                 onClick={handleCancel}
                 disabled={cancelling}
                 aria-busy={cancelling}
-                className={`min-h-[44px] flex-1 rounded-lg px-4 py-2 text-sm text-white ${
+                className={`min-h-[44px] flex-[2] rounded-lg px-4 py-2 text-sm text-white ${
                   cancelling ? "bg-red-300" : "bg-red-600"
                 }`}
               >
