@@ -1,0 +1,73 @@
+name: CI
+
+# PR作成・更新時と、mainへのpush(マージ)時に実行する。
+# Secretsは一切使わず、Supabase / Google Routes APIなど外部サービスにも接続しない
+# (backendのテストはSupabase・Google APIをモックに差し替えて実行される)。
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# 同じブランチ(PRならhead branch)の古い実行は、新しい実行が始まったらキャンセルする。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pytest
+        run: pytest -q
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Vitest
+        run: npm run test
+
+      - name: Build
+        run: npm run build
+
+      # リポジトリ全体(空のtreeとHEADの差分)を対象に、行末空白などを検出する。
+      # 履歴を必要としないため、checkoutのfetch-depth(既定1)のままで動く。
+      - name: Check whitespace (git diff --check)
+        working-directory: ${{ github.workspace }}
+        run: git diff --check "$(git hash-object -t tree /dev/null)" HEAD
