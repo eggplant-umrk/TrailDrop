@@ -9,7 +9,10 @@ function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route path="/" element={<ItemList />} />
+        {/* トップはルート検索(ルート → 受取地点 → 商品 → 予約)。商品一覧は
+            「すべての商品」からの下位導線。/route-testは既存リンク互換のため残す。 */}
+        <Route path="/" element={<RouteTest />} />
+        <Route path="/items" element={<ItemList />} />
         <Route path="/reserve/:id" element={<Reservation />} />
         <Route path="/reserve/:id/confirm" element={<Reservation />} />
         <Route path="/complete/:id" element={<ReservationComplete />} />

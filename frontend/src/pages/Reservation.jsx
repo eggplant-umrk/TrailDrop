@@ -5,6 +5,13 @@ import { saveAccessToken } from "../utils/reservationAccess";
 import { saveRouteContext } from "../utils/routeContext";
 import { isPickupWindowEnded, msUntilPickupWindowEnds } from "../utils/pickupWindow";
 import { toUserMessage } from "../utils/errorMessages";
+import { formatPickupHours } from "../utils/pickupHours";
+import {
+  AppLayout,
+  formatYen,
+  primaryButtonClass,
+  secondaryButtonClass,
+} from "../components/ui";
 
 const ITEM_LOAD_ERROR_MESSAGE = "商品情報を取得できませんでした。時間をおいて、もう一度お試しください。";
 
@@ -18,7 +25,7 @@ const CREATE_ERROR_BY_DETAIL = {
   "Requested date must be in the future": "希望日時は現在より後の日時を指定してください。",
   "Invalid payment method": "支払い方法を選び直してください。",
   "Pickup window is invalid":
-    "受取時間帯が正しくありません。お手数ですが、もう一度ルート分析からやり直してください。",
+    "受取時間帯が正しくありません。お手数ですが、もう一度検索からやり直してください。",
 };
 const CREATE_ERROR_BY_STATUS = {
   400: "入力内容が正しくありません。",
@@ -29,7 +36,7 @@ const CREATE_ERROR_BY_STATUS = {
 const CREATE_ERROR_FALLBACK = "予約に失敗しました。";
 
 const PICKUP_WINDOW_ENDED_MESSAGE =
-  "受取時間帯が終了しています。お手数ですが、もう一度ルート分析からやり直してください。";
+  "受取時間帯が終了しています。お手数ですが、もう一度検索からやり直してください。";
 // setTimeoutの遅延上限(約24.8日)。これを超える先の終了時刻は、上限で一度
 // 起きてから再計算する。
 const MAX_TIMEOUT_MS = 2 ** 31 - 1;
@@ -57,17 +64,13 @@ function minimumJapanDateTime() {
   return new Date(oneMinuteFromNowInJapan).toISOString().slice(0, 16);
 }
 
-// RouteTestで選択した受取時間帯の表示用(ReservationComplete.jsx/
-// StaffVerify.jsxの日時表示と同じAsia/Tokyo・h23形式に合わせる)。
+// RouteTestで選択した受取時間帯の表示用(「9月26日(土) 10:00〜12:00」)。
 function formatPickupWindow(startValue, endValue) {
-  const dateFormatter = new Intl.DateTimeFormat("ja-JP", {
+  const dayFormatter = new Intl.DateTimeFormat("ja-JP", {
     timeZone: "Asia/Tokyo",
-    year: "numeric",
     month: "long",
     day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
+    weekday: "short",
   });
   const timeFormatter = new Intl.DateTimeFormat("ja-JP", {
     timeZone: "Asia/Tokyo",
@@ -75,15 +78,8 @@ function formatPickupWindow(startValue, endValue) {
     minute: "2-digit",
     hourCycle: "h23",
   });
-  return `${dateFormatter.format(new Date(startValue))}〜${timeFormatter.format(new Date(endValue))}`;
-}
-
-// "HH:MM:SS" / "HH:MM" から表示用の"HH:MM"を取り出す(ItemList.jsx/
-// RouteTest.jsxと同じ抽出方法)。一括修正U2: 商品自体の営業時間を表示する。
-function formatPickupHours(value) {
-  if (typeof value !== "string") return null;
-  const match = value.match(/^(\d{2}):(\d{2})/);
-  return match ? `${match[1]}:${match[2]}` : null;
+  const start = new Date(startValue);
+  return `${dayFormatter.format(start)} ${timeFormatter.format(start)}〜${timeFormatter.format(new Date(endValue))}`;
 }
 
 // main.pyのVALID_PAYMENT_METHODSと合わせる。実決済は行わないモック決済。
@@ -277,9 +273,24 @@ export default function Reservation() {
     return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
   }, []);
 
-  if (loading) return <div className="p-4">読み込み中…</div>;
-  if (error) return <div className="p-4 text-red-600">{error}</div>;
-  if (!item) return <div className="p-4">指定された商品が見つかりません。</div>;
+  if (loading)
+    return (
+      <AppLayout step={3}>
+        <p className="p-4">読み込み中…</p>
+      </AppLayout>
+    );
+  if (error)
+    return (
+      <AppLayout step={3}>
+        <p className="p-4 text-red-600">{error}</p>
+      </AppLayout>
+    );
+  if (!item)
+    return (
+      <AppLayout step={3}>
+        <p className="p-4">指定された商品が見つかりません。</p>
+      </AppLayout>
+    );
 
   function handleProceedToConfirm(e) {
     e.preventDefault();
@@ -420,54 +431,106 @@ export default function Reservation() {
   // 現在時刻に追従する(PMレビューm-a)。
   const isPickupWindowExpired = pickupWindowEnded;
 
-  return (
-    <div className="min-h-screen p-4 bg-[#f7fbf6] text-[#16381b]">
-      <header className="mb-4">
-        <h2 className="text-xl font-semibold">{item.name}</h2>
-        <div className="text-sm">場所: {item.location}</div>
-        {item.pickupAvailableFrom && item.pickupAvailableTo && (
-          <div className="text-sm text-gray-600">
-            商品受取可能時間: {formatPickupHours(item.pickupAvailableFrom)}
-            〜{formatPickupHours(item.pickupAvailableTo)}
-          </div>
-        )}
-        {/* RouteTestで受取時間帯を選択してきた場合のみ表示する(入力画面・
-            確認画面の両方で確認できるようheaderに置く)。選択していない場合
-            (ItemListから直接来た等)はこのブロック自体を出さない。 */}
-        {pickupWindowStart && pickupWindowEnd && (
-          <div className="text-sm text-gray-600">
-            受取時間帯: {formatPickupWindow(pickupWindowStart, pickupWindowEnd)}
-          </div>
-        )}
-      </header>
+  // 受取地点はRouteTestで選んだ地点を優先し、無ければ商品の受取場所。
+  const pickupPlace = routePassPoint || item.location;
+  const itemHoursLabel =
+    item.pickupAvailableFrom && item.pickupAvailableTo
+      ? `${formatPickupHours(item.pickupAvailableFrom)}〜${formatPickupHours(item.pickupAvailableTo)}`
+      : null;
+  // RouteTestで受取時間帯を選択してきた場合のみ時間帯を表示する。選択して
+  // いない場合(商品一覧から直接来た等)は「時間指定なし」とし、推測で補わない。
+  const pickupWindowLabel =
+    pickupWindowStart && pickupWindowEnd
+      ? formatPickupWindow(pickupWindowStart, pickupWindowEnd)
+      : `時間指定なし${itemHoursLabel ? `（受取可能時間 ${itemHoursLabel}）` : ""}`;
 
-      {!isConfirmStep ? (
-        <form onSubmit={handleProceedToConfirm} className="space-y-3">
-          <div className="text-lg font-bold">¥{item.price}</div>
+  const summaryRows = [
+    { label: "受取地点", value: pickupPlace },
+    // 体験は受取時間帯ではなく希望日時で予約する。
+    ...(item.requiresDate ? [] : [{ label: "受取時間帯", value: pickupWindowLabel }]),
+    { label: "金額", value: formatYen(item.price) },
+  ];
+
+  const formErrorNode = formError && (
+    <p className="mb-2 text-sm text-red-600" role="alert">
+      {formError}
+    </p>
+  );
+
+  if (!isConfirmStep) {
+    return (
+      <AppLayout
+        step={3}
+        bottomBar={
+          <>
+            {formErrorNode}
+            <button type="submit" form="reservation-form" className={primaryButtonClass}>
+              確認へ進む
+            </button>
+          </>
+        }
+      >
+        <h1 className="pt-2 text-xl font-bold">予約内容の入力</h1>
+
+        <section className="mt-3 rounded-xl bg-white p-4 shadow-sm">
+          <p className="text-lg font-semibold">{item.name}</p>
+          <dl className="mt-2 space-y-2 text-sm">
+            {summaryRows.map((row) => (
+              <div key={row.label} className="flex justify-between gap-3">
+                <dt className="shrink-0 text-gray-500">{row.label}</dt>
+                <dd className="text-right font-medium">{row.value}</dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+
+        <form
+          id="reservation-form"
+          onSubmit={handleProceedToConfirm}
+          className="mt-4 space-y-4 rounded-xl bg-white p-4 shadow-sm"
+        >
           {item.requiresDate && (
             <label className="block">
-              <div className="text-sm">希望日時</div>
-              <input type="datetime-local" value={date} min={minimumJapanDateTime()} onChange={(e) => setDate(e.target.value)} required className="mt-1 p-2 border rounded w-full" />
+              <span className="text-sm font-medium">希望日時</span>
+              <input
+                type="datetime-local"
+                value={date}
+                min={minimumJapanDateTime()}
+                onChange={(e) => setDate(e.target.value)}
+                required
+                className="mt-1 block min-h-[44px] w-full rounded-lg border border-gray-300 px-3 py-2 text-base"
+              />
             </label>
           )}
 
           <label className="block">
-            <div className="text-sm">氏名（必須・100文字まで）</div>
+            <span className="text-sm font-medium">氏名</span>
+            <span className="block text-xs text-gray-500">
+              受取時の照合に使用します（100文字まで）
+            </span>
             <input
               type="text"
               value={name}
               onChange={(e) => setName(e.target.value)}
               required
               maxLength={100}
-              className="mt-1 p-2 border rounded w-full"
+              autoComplete="name"
+              className="mt-1 block min-h-[44px] w-full rounded-lg border border-gray-300 px-3 py-2 text-base"
             />
           </label>
 
-          <fieldset className="block">
-            <legend className="text-sm">支払い方法（必須）</legend>
-            <div className="mt-1 space-y-1">
+          <fieldset>
+            <legend className="text-sm font-medium">支払い方法</legend>
+            <div className="mt-1 space-y-2">
               {PAYMENT_METHODS.map((method) => (
-                <label key={method.value} className="flex items-center gap-2 p-2 border rounded">
+                <label
+                  key={method.value}
+                  className={`flex min-h-[44px] cursor-pointer items-center gap-3 rounded-lg border px-3 ${
+                    paymentMethod === method.value
+                      ? "border-[#2f6f3e] bg-[#eef6ec]"
+                      : "border-gray-300"
+                  }`}
+                >
                   <input
                     type="radio"
                     name="payment_method"
@@ -483,109 +546,102 @@ export default function Reservation() {
               ※これはデモ用のモック決済です。実際の支払いは発生しません。
             </p>
           </fieldset>
-
-          {formError && <div className="text-red-600">{formError}</div>}
-
-          <div className="flex justify-end">
-            <button type="submit" className="px-4 py-2 bg-[#2f6f3e] text-white rounded">
-              支払い内容を確認する
-            </button>
-          </div>
         </form>
-      ) : (
-        <div className="space-y-3">
-          <div className="bg-white p-4 rounded-md shadow">
-            <h3 className="text-sm font-semibold mb-2">支払い内容のご確認</h3>
-            <dl className="space-y-1 text-sm">
-              <div className="flex justify-between">
-                <dt>商品</dt>
-                <dd>{item.name}</dd>
-              </div>
-              <div className="flex justify-between">
-                <dt>金額</dt>
-                <dd>¥{item.price}</dd>
-              </div>
-              <div className="flex justify-between">
-                <dt>氏名</dt>
-                <dd>{name}</dd>
-              </div>
-              {item.requiresDate && (
-                <div className="flex justify-between">
-                  <dt>希望日時</dt>
-                  <dd>{formatRequestedDateTime(date)}</dd>
-                </div>
-              )}
-              <div className="flex justify-between">
-                <dt>支払い方法</dt>
-                <dd>{selectedPaymentLabel}</dd>
-              </div>
-            </dl>
-            <p className="mt-2 text-xs text-gray-500">
-              これはデモ用のモック決済です。実際の支払いは発生しません。
-            </p>
-          </div>
+      </AppLayout>
+    );
+  }
 
-          {ambiguousFailure && (
-            <div
-              className="rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900"
-              role="alert"
-            >
-              <p className="font-semibold">予約が完了したかどうか、この画面では確認できません</p>
-              <ul className="mt-2 list-disc space-y-1 pl-5">
-                <li>通信状況により、予約が作成されたかどうかをこの画面では判断できませんでした。</li>
-                <li>
-                  同じ内容でお支払いをすぐに再試行すると、二重に予約されるおそれがあります。むやみに再試行しないでください。
-                </li>
-                <li>現時点では、この画面から予約状況をご自身で確認する機能はありません。</li>
-                <li>ご不安な場合は、受取窓口（{item.location}）で予約状況をご確認ください。</li>
-              </ul>
-            </div>
-          )}
-          {/* 押下時の再判定でformErrorに同じ文言を出した場合は二重に表示しない。 */}
-          {isPickupWindowExpired && formError !== PICKUP_WINDOW_ENDED_MESSAGE && (
-            <div className="rounded border border-red-300 bg-red-50 p-3 text-sm text-red-700" role="alert">
-              {PICKUP_WINDOW_ENDED_MESSAGE}
-            </div>
-          )}
-          {formError && <div className="text-red-600">{formError}</div>}
+  return (
+    <AppLayout
+      step={3}
+      bottomBar={
+        <>
+          {formErrorNode}
+          <button
+            type="button"
+            onClick={handleConfirmPayment}
+            disabled={submitting || isPickupWindowExpired}
+            aria-busy={submitting}
+            className={primaryButtonClass}
+          >
+            {submitting ? "予約中…" : `${formatYen(item.price)} で予約を確定する`}
+          </button>
+        </>
+      }
+    >
+      <h1 className="pt-2 text-xl font-bold">予約内容の確認</h1>
 
-          <div className="flex gap-2">
-            <button
-              type="button"
-              // 確認画面の履歴を入力画面で置き換える(replace)。pushすると
-              // 入力内容を持った確認画面の履歴が残り、予約完了後にブラウザの
-              // 戻る操作でその確認画面へ戻って二重予約できてしまうため。
-              onClick={() =>
-                navigate(`/reserve/${id}`, {
-                  replace: true,
-                  state: {
-                    origin: routeOrigin,
-                    destination: routeDestination,
-                    passPoint: routePassPoint,
-                    passPointLat: routePassPointLat,
-                    passPointLng: routePassPointLng,
-                    pickupWindowStart,
-                    pickupWindowEnd,
-                  },
-                })
-              }
-              disabled={submitting}
-              className="flex-1 px-4 py-2 bg-gray-200 rounded disabled:opacity-50"
-            >
-              戻る
-            </button>
-            <button
-              type="button"
-              onClick={handleConfirmPayment}
-              disabled={submitting || isPickupWindowExpired}
-              aria-busy={submitting}
-              className={`flex-1 px-4 py-2 text-white rounded disabled:opacity-50 ${submitting ? 'bg-gray-400' : 'bg-[#2f6f3e]'}`}
-            >
-              {submitting ? '予約中…' : '支払いを確定する'}
-            </button>
-          </div>
+      <section className="mt-3 rounded-xl bg-white p-4 shadow-sm">
+        <dl className="divide-y divide-gray-100 text-sm">
+          {[
+            { label: "商品", value: item.name },
+            ...summaryRows,
+            { label: "氏名", value: name },
+            ...(item.requiresDate
+              ? [{ label: "希望日時", value: formatRequestedDateTime(date) }]
+              : []),
+            { label: "支払い方法", value: selectedPaymentLabel },
+          ].map((row) => (
+            <div key={row.label} className="flex justify-between gap-3 py-2">
+              <dt className="shrink-0 text-gray-500">{row.label}</dt>
+              <dd className="text-right font-medium">{row.value}</dd>
+            </div>
+          ))}
+        </dl>
+        {/* 「…発生しませ/ん。」のような改行を避けるため、文単位で折り返す。 */}
+        <p className="mt-2 text-xs text-gray-500">
+          <span className="inline-block">これはデモ用のモック決済です。</span>
+          <span className="inline-block">実際の支払いは発生しません。</span>
+        </p>
+      </section>
+
+      {ambiguousFailure && (
+        <div
+          className="mt-4 rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900"
+          role="alert"
+        >
+          <p className="font-semibold">予約が完了したかどうか、この画面では確認できません</p>
+          <ul className="mt-2 list-disc space-y-1 pl-5">
+            <li>通信状況により、予約が作成されたかどうかをこの画面では判断できませんでした。</li>
+            <li>
+              同じ内容でお支払いをすぐに再試行すると、二重に予約されるおそれがあります。むやみに再試行しないでください。
+            </li>
+            <li>現時点では、この画面から予約状況をご自身で確認する機能はありません。</li>
+            <li>ご不安な場合は、受取窓口（{item.location}）で予約状況をご確認ください。</li>
+          </ul>
         </div>
       )}
-    </div>
+      {/* 押下時の再判定でformErrorに同じ文言を出した場合は二重に表示しない。 */}
+      {isPickupWindowExpired && formError !== PICKUP_WINDOW_ENDED_MESSAGE && (
+        <div className="mt-4 rounded border border-red-300 bg-red-50 p-3 text-sm text-red-700" role="alert">
+          {PICKUP_WINDOW_ENDED_MESSAGE}
+        </div>
+      )}
+
+      <button
+        type="button"
+        // 確認画面の履歴を入力画面で置き換える(replace)。pushすると
+        // 入力内容を持った確認画面の履歴が残り、予約完了後にブラウザの
+        // 戻る操作でその確認画面へ戻って二重予約できてしまうため。
+        onClick={() =>
+          navigate(`/reserve/${id}`, {
+            replace: true,
+            state: {
+              origin: routeOrigin,
+              destination: routeDestination,
+              passPoint: routePassPoint,
+              passPointLat: routePassPointLat,
+              passPointLng: routePassPointLng,
+              pickupWindowStart,
+              pickupWindowEnd,
+            },
+          })
+        }
+        disabled={submitting}
+        className={`${secondaryButtonClass} mt-4`}
+      >
+        入力内容を修正する
+      </button>
+    </AppLayout>
   );
 }

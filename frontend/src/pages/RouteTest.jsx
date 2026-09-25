@@ -1,6 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import api from "../api/client";
+import {
+  AppLayout,
+  formatYen,
+  primaryButtonClass,
+  secondaryButtonClass,
+} from "../components/ui";
 import { toUserMessage } from "../utils/errorMessages";
 import { getCurrentLocation } from "../utils/geolocation";
 import {
@@ -8,6 +14,24 @@ import {
   normalizePickupCandidates,
   selectPickupCandidate,
 } from "../utils/pickupCandidates";
+import {
+  findWindowOffsetForItem,
+  formatPickupHours,
+  hasPickupHours,
+  isItemAvailableAt,
+  jstMinutesSinceMidnight,
+  nowDepartureInputValue,
+  suggestDepartureForItem,
+} from "../utils/pickupHours";
+
+// 受取可能時間まわりの判定はutils/pickupHours.jsへ移した。既存のテスト・
+// 呼び出し元のためにここからも公開する。
+export {
+  formatPickupHours,
+  isItemAvailableAt,
+  jstMinutesSinceMidnight,
+  parseTimeStringToMinutes,
+} from "../utils/pickupHours";
 
 // 「現在地を使う」選択中に出発地として送る表示用ラベル。実際の出発地は
 // origin_location(座標)としてBackendへ送る。座標自体は保存しない。
@@ -17,13 +41,13 @@ const CURRENT_LOCATION_LABEL = "現在地";
 // detailは英語の内部向け文言のため、そのまま表示しない)。422のうち
 // バリデーションエラー(detailが配列)はclient.jsで既に日本語化済み。
 const ROUTE_ANALYSIS_ERROR_BY_STATUS = {
-  401: "ルート分析を利用できませんでした。時間をおいて、もう一度お試しください。",
+  401: "ルートを検索できませんでした。時間をおいて、もう一度お試しください。",
   422: "出発地・目的地・出発日時からルートを計算できませんでした。入力内容を確認してください。",
-  429: "ルート分析の利用が集中しています。1分ほど待ってから、もう一度お試しください。",
+  429: "ルート検索の利用が集中しています。1分ほど待ってから、もう一度お試しください。",
   502: "ルート情報を取得できませんでした。時間をおいて、もう一度お試しください。",
-  503: "現在ルート分析を利用できません。時間をおいて、もう一度お試しください。",
+  503: "現在ルート検索を利用できません。時間をおいて、もう一度お試しください。",
 };
-const ROUTE_ANALYSIS_ERROR_FALLBACK = "ルート分析に失敗しました。";
+const ROUTE_ANALYSIS_ERROR_FALLBACK = "ルートの検索に失敗しました。";
 const ITEMS_LOAD_ERROR_FALLBACK = "商品情報の取得に失敗しました。";
 
 // RouteTestの入力・分析結果をlocalStorageに保存し、Reservationからの戻る
@@ -59,17 +83,6 @@ export function saveRouteTestState(state) {
   }
 }
 
-function formatJapanDateTime(value) {
-  return new Intl.DateTimeFormat("ja-JP", {
-    timeZone: "Asia/Tokyo",
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(value));
-}
-
 function formatJapanTime(date) {
   return new Intl.DateTimeFormat("ja-JP", {
     timeZone: "Asia/Tokyo",
@@ -79,57 +92,32 @@ function formatJapanTime(date) {
   }).format(date);
 }
 
-// dateが指すJST上の「その日の0時からの経過分」。深夜またぎ(前日/翌日をまたぐ受取枠)
-// は今回のスコープ外のため、日付をまたいだ比較は正しく扱わない前提でよい。
-export function jstMinutesSinceMidnight(date) {
-  const parts = new Intl.DateTimeFormat("ja-JP", {
+function formatJapanDay(date) {
+  return new Intl.DateTimeFormat("ja-JP", {
     timeZone: "Asia/Tokyo",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  }).formatToParts(date);
-  const hour = Number(parts.find((part) => part.type === "hour")?.value);
-  const minute = Number(parts.find((part) => part.type === "minute")?.value);
-  return hour * 60 + minute;
+    month: "long",
+    day: "numeric",
+    weekday: "short",
+  }).format(date);
 }
 
-// "HH:MM:SS" / "HH:MM" (Supabaseのtime型がJSONで返す形式) を0時からの経過分へ。
-export function parseTimeStringToMinutes(value) {
-  if (typeof value !== "string") return null;
-  const match = value.match(/^(\d{2}):(\d{2})/);
-  if (!match) return null;
-  return Number(match[1]) * 60 + Number(match[2]);
-}
-
-// "HH:MM:SS" / "HH:MM" から表示用の"HH:MM"を取り出す。time型には日付・
-// timezoneの概念が無いため、Dateへの変換は行わず文字列のまま扱う
-// (parseTimeStringToMinutesと同じ抽出方法)。
-export function formatPickupHours(value) {
-  if (typeof value !== "string") return null;
-  const match = value.match(/^(\d{2}):(\d{2})/);
-  return match ? `${match[1]}:${match[2]}` : null;
-}
-
-// 商品の受取可能時間(pickup_available_from/to)に、実効受取予定時刻
-// (pass_at + windowOffsetMinutes、以前は2時間幅の受取枠全体との重なりで
-// 判定していたが、枠の端だけが営業時間に触れていて実際の通過時刻は営業時間外、
-// というケースを誤って「受け取れる」としてしまっていたため、一点判定に変更)
-// が収まっているかどうかを判定する。受取可能時間が未設定(null)の商品は
-// 「常に受け取れる」とは解釈せず、対象外とする。境界(ちょうど開店・閉店時刻)
-// は利用可として扱う。
-export function isItemAvailableAt(item, effectiveMinutes) {
-  const itemStart = parseTimeStringToMinutes(item.pickup_available_from);
-  const itemEnd = parseTimeStringToMinutes(item.pickup_available_to);
-  if (itemStart === null || itemEnd === null) {
-    return false;
-  }
-  return itemStart <= effectiveMinutes && effectiveMinutes <= itemEnd;
+// datetime-localの値(JST)を「9月27日(日) 09:00」の形で表示する。
+function formatDepartureInputValue(value) {
+  const date = new Date(`${value}:00+09:00`);
+  return `${formatJapanDay(date)} ${formatJapanTime(date)}`;
 }
 
 const WINDOW_DURATION_MINUTES = 120;
 const WINDOW_HALF_DURATION_MINUTES = WINDOW_DURATION_MINUTES / 2;
 const WINDOW_OFFSET_STEP_MINUTES = 30;
 const WINDOW_OFFSET_MAX_MINUTES = 180;
+const WINDOW_OFFSET_RANGE = {
+  stepMinutes: WINDOW_OFFSET_STEP_MINUTES,
+  maxMinutes: WINDOW_OFFSET_MAX_MINUTES,
+};
+
+const inputClass =
+  "mt-1 block min-h-[44px] w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-base";
 
 export default function RouteTest() {
   // 起動時に1度だけ復元を試みる(TTL切れ・壊れたデータはnullになる)。
@@ -146,7 +134,13 @@ export default function RouteTest() {
   const [locating, setLocating] = useState(false);
   const [locationMessage, setLocationMessage] = useState(null);
   const [destination, setDestination] = useState(initialRouteState?.destination ?? "下呂温泉");
+  // 出発日時は既定で「今すぐ」。"custom"の時だけdepartureAtの入力値を使う。
+  const [departureMode, setDepartureMode] = useState(initialRouteState?.departureMode ?? "now");
   const [departureAt, setDepartureAt] = useState(initialRouteState?.departureAt ?? "");
+  // 実際に検索に使った出発日時(「出発をずらす」目安の計算用)。
+  const [searchedDepartureAt, setSearchedDepartureAt] = useState(
+    initialRouteState?.searchedDepartureAt ?? null,
+  );
   const [result, setResult] = useState(initialRouteState?.result ?? null);
   // 選択中の受取地点(候補のname)。候補の切り替えはAPIを呼ばず、取得済みの
   // 候補(pass_at等)から画面を計算し直すだけ。
@@ -155,6 +149,9 @@ export default function RouteTest() {
   );
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [scrollToResults, setScrollToResults] = useState(false);
+  const resultsRef = useRef(null);
+  const formRef = useRef(null);
 
   // 商品一覧は、ルート分析結果とは別のライフサイクルを持つ(ルート分析は成功して
   // いるのに商品取得だけ失敗する、といったケースを区別するため)。受取地点の
@@ -185,12 +182,31 @@ export default function RouteTest() {
     saveRouteTestState({
       origin,
       destination,
+      departureMode,
       departureAt,
+      searchedDepartureAt,
       result,
       windowOffsetMinutes,
       selectedPickupName,
     });
-  }, [origin, destination, departureAt, result, windowOffsetMinutes, selectedPickupName]);
+  }, [
+    origin,
+    destination,
+    departureMode,
+    departureAt,
+    searchedDepartureAt,
+    result,
+    windowOffsetMinutes,
+    selectedPickupName,
+  ]);
+
+  // 検索に成功したら、結果(受取地点・商品)まで自動でスクロールする。商品の
+  // 読み込み中はページが短く目的の位置まで届かないため、読み込み後に行う。
+  useEffect(() => {
+    if (!scrollToResults || loading || itemsLoading) return;
+    setScrollToResults(false);
+    resultsRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+  }, [scrollToResults, loading, itemsLoading]);
 
   async function loadItems() {
     setItemsLoading(true);
@@ -207,8 +223,7 @@ export default function RouteTest() {
     }
   }
 
-  async function handleSubmit(event) {
-    event.preventDefault();
+  async function runSearch(departureValue) {
     setLoading(true);
     setError(null);
     setResult(null);
@@ -220,13 +235,15 @@ export default function RouteTest() {
       const data = await api.analyzeRoute({
         origin: originLocation ? CURRENT_LOCATION_LABEL : origin.trim(),
         destination: destination.trim(),
-        departure_at: `${departureAt}:00+09:00`,
+        departure_at: `${departureValue}:00+09:00`,
         origin_location: originLocation,
       });
       setResult(data);
+      setSearchedDepartureAt(departureValue);
       // 初期選択はルート上で最初に出会う受取地点(候補はルート順)。
       const candidates = normalizePickupCandidates(data);
       setSelectedPickupName(candidates[0]?.name ?? null);
+      setScrollToResults(true);
       if (candidates.length > 0) {
         await loadItems();
       }
@@ -240,6 +257,20 @@ export default function RouteTest() {
     } finally {
       setLoading(false);
     }
+  }
+
+  function handleSubmit(event) {
+    event.preventDefault();
+    runSearch(departureMode === "now" ? nowDepartureInputValue() : departureAt);
+  }
+
+  // 受取時間のスライダーでは届かない商品向け。出発日時を目安の値に変えて
+  // 検索し直す(ユーザーが押した時だけ再検索する)。
+  function handleSearchWithDeparture(value) {
+    setDepartureMode("custom");
+    setDepartureAt(value);
+    formRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+    runSearch(value);
   }
 
   async function handleUseCurrentLocation() {
@@ -266,6 +297,15 @@ export default function RouteTest() {
     setSelectedPickupName(name);
     // 到着目安が変わるため、受取枠は選んだ地点の到着目安を中心に戻す。
     setWindowOffsetMinutes(0);
+  }
+
+  function shiftWindow(deltaMinutes) {
+    setWindowOffsetMinutes((current) =>
+      Math.max(
+        -WINDOW_OFFSET_MAX_MINUTES,
+        Math.min(WINDOW_OFFSET_MAX_MINUTES, current + deltaMinutes),
+      ),
+    );
   }
 
   const pickupCandidates = normalizePickupCandidates(result);
@@ -297,10 +337,8 @@ export default function RouteTest() {
   const isPickupWindowExpired = windowEndDate ? windowEndDate.getTime() <= Date.now() : false;
 
   // 実効受取予定時刻(windowOffsetMinutesだけ通過予定時刻をずらした、実際に
-  // 受取枠の中心となる瞬間)。表示・予約への引き継ぎに使う2時間幅の受取枠
-  // (windowStartDate/windowEndDate)とは別に、商品の営業時間内判定だけは
-  // この一点で行う(枠の端だけが営業時間に触れていても、実際に受け取る
-  // つもりの時刻が営業時間外なら不適切なため)。
+  // 受取枠の中心となる瞬間)。商品の営業時間内判定だけはこの一点で行う。
+  // 内部判定用の値のため、画面には表示しない。
   const effectiveDate = passAtDate
     ? new Date(passAtDate.getTime() + windowOffsetMinutes * 60000)
     : null;
@@ -310,308 +348,441 @@ export default function RouteTest() {
         isItemAvailableAt(item, jstMinutesSinceMidnight(effectiveDate)),
       )
     : [];
+  // 受取可能時間は設定されているが、今の受取時間帯では受け取れない商品。
+  // 「受け取れる商品はありません」で止めず、ずらし方を案内する。
+  const laterItems = effectiveDate
+    ? matchedItems.filter(
+        (item) => hasPickupHours(item) && !timeFilteredItems.includes(item),
+      )
+    : [];
+
+  const pickupDayLabel =
+    windowStartDate && formatJapanDay(windowStartDate) !== formatJapanDay(new Date())
+      ? formatJapanDay(windowStartDate)
+      : null;
+  const pickupWindowLabel = windowStartDate
+    ? `${formatJapanTime(windowStartDate)}〜${formatJapanTime(windowEndDate)}`
+    : "";
+
+  function laterItemAction(item) {
+    const offset = findWindowOffsetForItem(item, passAtDate.getTime(), WINDOW_OFFSET_RANGE);
+    if (offset !== null) {
+      const start = new Date(
+        passAtDate.getTime() + (offset - WINDOW_HALF_DURATION_MINUTES) * 60000,
+      );
+      const end = new Date(passAtDate.getTime() + (offset + WINDOW_HALF_DURATION_MINUTES) * 60000);
+      return (
+        <button
+          type="button"
+          onClick={() => setWindowOffsetMinutes(offset)}
+          className={secondaryButtonClass}
+        >
+          受取時間を {formatJapanTime(start)}〜{formatJapanTime(end)} にずらす
+        </button>
+      );
+    }
+    const suggested =
+      searchedDepartureAt &&
+      suggestDepartureForItem(item, {
+        passAtMs: passAtDate.getTime(),
+        departureMs: new Date(`${searchedDepartureAt}:00+09:00`).getTime(),
+      });
+    if (!suggested) return null;
+    return (
+      <button
+        type="button"
+        onClick={() => handleSearchWithDeparture(suggested)}
+        disabled={loading}
+        className={secondaryButtonClass}
+      >
+        出発を {formatDepartureInputValue(suggested)} にして探し直す
+      </button>
+    );
+  }
 
   return (
-    <main className="min-h-screen bg-[#f7fbf6] px-4 py-8 text-[#16381b]">
-      <div className="mx-auto max-w-xl">
-        <header className="mb-6">
-          <h1 className="text-2xl font-semibold">ルート分析</h1>
-          <p className="mt-1 text-sm text-gray-600">
-            ルートの近くにある受取地点と、到着の目安を確認できます
-          </p>
-        </header>
+    <AppLayout step={result ? 2 : 1}>
+      <section className="pt-2">
+        <h1 className="text-2xl font-bold leading-snug">
+          移動のついでに、
+          <br />
+          道の駅で地元の品を受け取る
+        </h1>
+        <p className="mt-2 text-sm text-gray-600">
+          行き先を入れると、途中で立ち寄れる受取地点と、そこで受け取れる商品がわかります。
+        </p>
+      </section>
 
-        <form onSubmit={handleSubmit} className="space-y-4 bg-white p-4 shadow-sm rounded-md">
-          <div>
-            {originLocation ? (
-              <div>
-                <span className="text-sm font-medium">出発地</span>
-                <div className="mt-1 flex items-center justify-between gap-2 rounded border border-[#2f6f3e] bg-[#f7fbf6] p-2">
-                  <span className="text-sm">現在地を使用します</span>
-                  <button
-                    type="button"
-                    onClick={handleClearCurrentLocation}
-                    className="text-sm text-[#2f6f3e] underline"
-                  >
-                    入力に戻す
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <label className="block">
-                <span className="text-sm font-medium">出発地</span>
-                <input
-                  type="text"
-                  value={origin}
-                  onChange={(event) => setOrigin(event.target.value)}
-                  required
-                  className="mt-1 w-full rounded border border-gray-300 p-2"
-                />
-              </label>
-            )}
-            {!originLocation && (
+      <form
+        ref={formRef}
+        onSubmit={handleSubmit}
+        className="mt-4 scroll-mt-16 space-y-4 rounded-xl bg-white p-4 shadow-sm"
+      >
+        <div>
+          <span className="text-sm font-medium">出発地</span>
+          {originLocation ? (
+            <div className="mt-1 flex min-h-[44px] items-center justify-between gap-2 rounded-lg border border-[#2f6f3e] bg-[#f7fbf6] px-3">
+              <span className="text-base">現在地から出発</span>
+              <button
+                type="button"
+                onClick={handleClearCurrentLocation}
+                className="min-h-[44px] px-2 text-sm text-[#2f6f3e] underline"
+              >
+                入力に戻す
+              </button>
+            </div>
+          ) : (
+            <div className="mt-1 flex gap-2">
+              <input
+                type="text"
+                value={origin}
+                onChange={(event) => setOrigin(event.target.value)}
+                required
+                aria-label="出発地"
+                className={`${inputClass} mt-0 min-w-0 flex-1`}
+              />
               <button
                 type="button"
                 onClick={handleUseCurrentLocation}
                 disabled={locating}
-                className="mt-2 text-sm text-[#2f6f3e] underline disabled:text-gray-400"
+                className="min-h-[44px] shrink-0 rounded-lg border border-[#2f6f3e] px-3 text-sm font-medium text-[#2f6f3e] disabled:border-gray-300 disabled:text-gray-400"
               >
-                {locating ? "現在地を取得中…" : "現在地を使う"}
+                {locating ? "取得中…" : "現在地"}
               </button>
-            )}
-            {locationMessage && (
-              <p className="mt-1 text-sm text-red-600" role="alert">
-                {locationMessage}
-              </p>
-            )}
+            </div>
+          )}
+          {locationMessage && (
+            <p className="mt-1 text-sm text-red-600" role="alert">
+              {locationMessage}
+            </p>
+          )}
+        </div>
+
+        <label className="block">
+          <span className="text-sm font-medium">目的地</span>
+          <input
+            type="text"
+            value={destination}
+            onChange={(event) => setDestination(event.target.value)}
+            required
+            className={inputClass}
+          />
+        </label>
+
+        <fieldset>
+          <legend className="text-sm font-medium">出発日時</legend>
+          <div className="mt-1 grid grid-cols-2 gap-2">
+            {[
+              { value: "now", label: "今すぐ" },
+              { value: "custom", label: "日時を指定" },
+            ].map((option) => (
+              <label
+                key={option.value}
+                className={`flex min-h-[44px] cursor-pointer items-center justify-center rounded-lg border text-sm font-medium ${
+                  departureMode === option.value
+                    ? "border-[#2f6f3e] bg-[#eef6ec] text-[#2f6f3e]"
+                    : "border-gray-300 bg-white text-gray-700"
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="departure-mode"
+                  value={option.value}
+                  checked={departureMode === option.value}
+                  onChange={() => setDepartureMode(option.value)}
+                  className="sr-only"
+                />
+                {option.label}
+              </label>
+            ))}
           </div>
-
-          <label className="block">
-            <span className="text-sm font-medium">目的地</span>
-            <input
-              type="text"
-              value={destination}
-              onChange={(event) => setDestination(event.target.value)}
-              required
-              className="mt-1 w-full rounded border border-gray-300 p-2"
-            />
-          </label>
-
-          <label className="block">
-            <span className="text-sm font-medium">出発日時</span>
+          {departureMode === "custom" && (
             <input
               type="datetime-local"
               value={departureAt}
+              min={nowDepartureInputValue(Date.now(), 1)}
               onChange={(event) => setDepartureAt(event.target.value)}
               required
-              className="mt-1 w-full rounded border border-gray-300 p-2"
+              aria-label="出発日時"
+              className={`${inputClass} mt-2`}
             />
-          </label>
+          )}
+        </fieldset>
 
-          {error && <p className="text-sm text-red-600">{error}</p>}
+        {error && (
+          <p className="text-sm text-red-600" role="alert">
+            {error}
+          </p>
+        )}
 
-          <button
-            type="submit"
-            disabled={loading}
-            className={`w-full rounded px-4 py-2 font-medium text-white ${
-              loading ? "bg-gray-400" : "bg-[#2f6f3e]"
-            }`}
-          >
-            {loading ? "分析中…" : "ルート分析"}
-          </button>
-        </form>
+        <button type="submit" disabled={loading} className={primaryButtonClass}>
+          {loading ? "探しています…" : "受け取れる商品を探す"}
+        </button>
+      </form>
 
-        {result && (
-          <>
-            <section className="mt-5 bg-white p-4 shadow-sm rounded-md" aria-live="polite">
-              <h2 className="text-lg font-semibold">分析結果</h2>
-              <dl className="mt-3 space-y-3">
-                {pickupCandidates.length === 0 ? (
-                  <div>
-                    <dt className="text-sm text-gray-600">受取地点</dt>
-                    <dd className="mt-1 text-sm">
-                      このルートの近くには受取地点が見つかりませんでした。出発地・目的地を変えてお試しください。
-                    </dd>
-                  </div>
-                ) : (
-                  <>
-                    <div>
-                      <dt className="text-sm text-gray-600">受取地点</dt>
-                      {pickupCandidates.length === 1 ? (
-                        <dd className="font-medium">{selectedPickup.name}</dd>
-                      ) : (
-                        <dd>
-                          <p className="text-xs text-gray-500">
-                            ルートの近くに受取地点が{pickupCandidates.length}か所あります（ルート上の順）。受け取る地点を選んでください。
-                          </p>
-                          <fieldset className="mt-2 space-y-2">
-                            <legend className="sr-only">受取地点を選択</legend>
-                            {pickupCandidates.map((candidate) => (
-                              <label
-                                key={candidate.name}
-                                className={`flex items-start gap-2 rounded border p-2 ${
-                                  candidate.name === selectedPickup.name
-                                    ? "border-[#2f6f3e] bg-[#f7fbf6]"
-                                    : "border-gray-200"
-                                }`}
-                              >
-                                <input
-                                  type="radio"
-                                  name="pickup-location"
-                                  value={candidate.name}
-                                  checked={candidate.name === selectedPickup.name}
-                                  onChange={() => handleSelectPickup(candidate.name)}
-                                  className="mt-1"
-                                />
-                                <span>
-                                  <span className="block font-medium">{candidate.name}</span>
-                                  <span className="block text-xs text-gray-600">
-                                    到着目安 {formatJapanTime(new Date(candidate.pass_at))}
-                                    {formatDistanceFromRoute(candidate.distance_from_route_meters) &&
-                                      `・${formatDistanceFromRoute(candidate.distance_from_route_meters)}`}
-                                  </span>
-                                </span>
-                              </label>
-                            ))}
-                          </fieldset>
-                        </dd>
-                      )}
-                    </div>
-                    <div>
-                      <dt className="text-sm text-gray-600">到着目安</dt>
-                      <dd className="font-medium">{formatJapanDateTime(selectedPickup.pass_at)}</dd>
-                      {selectedPickup.distance_from_route_meters !== null && (
-                        <dd className="mt-1 text-xs text-gray-500">
-                          ルート上で受取地点に最も近い地点への到着予定時刻です（{formatDistanceFromRoute(selectedPickup.distance_from_route_meters)}）。受取地点までの寄り道の時間は含みません。
-                        </dd>
-                      )}
-                    </div>
-                  </>
-                )}
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <dt className="text-sm text-gray-600">総移動時間</dt>
-                    <dd className="font-medium">{result.total_duration_minutes}分</dd>
-                  </div>
-                  <div>
-                    <dt className="text-sm text-gray-600">総距離</dt>
-                    <dd className="font-medium">
-                      {(result.total_distance_meters / 1000).toFixed(1)}km
-                    </dd>
-                  </div>
-                </div>
-              </dl>
-            </section>
-
-            {selectedPickup && (
-            <>
-            <section className="mt-5 bg-white p-4 shadow-sm rounded-md">
-              <h2 className="text-lg font-semibold">受取時間を設定</h2>
-              <p className="mt-1 text-xs text-gray-500">到着目安の前後で調整できます</p>
+      {result && (
+        <section ref={resultsRef} className="mt-6 scroll-mt-16 space-y-4" aria-live="polite">
+          {pickupCandidates.length === 0 ? (
+            <div className="rounded-xl bg-white p-4 shadow-sm">
+              <h2 className="text-lg font-semibold">受取地点が見つかりませんでした</h2>
               <p className="mt-1 text-sm text-gray-600">
-                受取時間: {formatJapanTime(windowStartDate)}〜{formatJapanTime(windowEndDate)}
+                このルートの近くには受取地点がありません。出発地・目的地を変えてお試しください。
               </p>
-              {/* 商品の営業時間内判定はeffectiveDate(この時刻)の一点で行って
-                  いるため、「受取時間(枠)」とは別に明示する(一括修正U3)。 */}
-              <p className="mt-1 text-xs text-gray-500">
-                受取予定: {formatJapanTime(effectiveDate)}（このルートで受け取れる商品は、この時刻を基準に判定しています）
-              </p>
-              {isPickupWindowExpired && (
-                <p className="mt-1 text-sm text-red-600" role="alert">
-                  受取時間帯が終了しています。受取時間をずらすか、もう一度ルート分析をやり直してください。
+            </div>
+          ) : (
+            <>
+              <div className="rounded-xl bg-white p-4 shadow-sm">
+                <h2 className="text-xs font-medium text-gray-500">受取地点</h2>
+                {pickupCandidates.length === 1 ? (
+                  <p className="mt-1 text-lg font-semibold">{selectedPickup.name}</p>
+                ) : (
+                  <fieldset className="mt-1">
+                    <legend className="text-xs text-gray-500">
+                      ルート上に{pickupCandidates.length}か所あります（通る順）
+                    </legend>
+                    <div className="mt-2 space-y-2">
+                      {pickupCandidates.map((candidate) => (
+                        <label
+                          key={candidate.name}
+                          className={`flex min-h-[44px] cursor-pointer items-start gap-2 rounded-lg border p-3 ${
+                            candidate.name === selectedPickup.name
+                              ? "border-[#2f6f3e] bg-[#f7fbf6]"
+                              : "border-gray-200"
+                          }`}
+                        >
+                          <input
+                            type="radio"
+                            name="pickup-location"
+                            value={candidate.name}
+                            checked={candidate.name === selectedPickup.name}
+                            onChange={() => handleSelectPickup(candidate.name)}
+                            className="mt-1"
+                          />
+                          <span>
+                            <span className="block font-medium">{candidate.name}</span>
+                            <span className="block text-xs text-gray-600">
+                              到着目安 {formatJapanTime(new Date(candidate.pass_at))}
+                              {formatDistanceFromRoute(candidate.distance_from_route_meters) &&
+                                `・${formatDistanceFromRoute(candidate.distance_from_route_meters)}`}
+                            </span>
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+                  </fieldset>
+                )}
+
+                <dl className="mt-3 grid grid-cols-2 gap-3">
+                  <div className="rounded-lg bg-[#f7fbf6] p-3">
+                    <dt className="text-xs text-gray-500">到着目安</dt>
+                    <dd className="text-xl font-bold">{formatJapanTime(passAtDate)}</dd>
+                  </div>
+                  <div className="rounded-lg bg-[#f7fbf6] p-3">
+                    <dt className="text-xs text-gray-500">受取時間帯</dt>
+                    <dd className="text-xl font-bold">{pickupWindowLabel}</dd>
+                  </div>
+                </dl>
+                {pickupDayLabel && (
+                  <p className="mt-2 text-sm font-medium">{pickupDayLabel}の受取です</p>
+                )}
+                <p className="mt-2 text-xs text-gray-500">
+                  到着目安は寄り道時間を含みません
+                  {/* 括弧内の「い）」だけが改行されないよう、括弧ごと折り返す。 */}
+                  {formatDistanceFromRoute(selectedPickup.distance_from_route_meters) && (
+                    <span className="inline-block">
+                      （受取地点は{formatDistanceFromRoute(selectedPickup.distance_from_route_meters)}）
+                    </span>
+                  )}
                 </p>
-              )}
-              <input
-                type="range"
-                min={-WINDOW_OFFSET_MAX_MINUTES}
-                max={WINDOW_OFFSET_MAX_MINUTES}
-                step={WINDOW_OFFSET_STEP_MINUTES}
-                value={windowOffsetMinutes}
-                onChange={(event) => setWindowOffsetMinutes(Number(event.target.value))}
-                className="mt-3 w-full"
-                aria-label="受取時間の枠をずらす"
-              />
-              {windowOffsetMinutes !== 0 && (
-                <button
-                  type="button"
-                  onClick={() => setWindowOffsetMinutes(0)}
-                  className="mt-2 text-sm text-[#2f6f3e] underline"
-                >
-                  到着目安を中心に戻す
-                </button>
-              )}
-            </section>
+                {isPickupWindowExpired && (
+                  <p className="mt-2 text-sm text-red-600" role="alert">
+                    受取時間帯が終了しています。受取時間をずらすか、もう一度検索してください。
+                  </p>
+                )}
+              </div>
 
-            <section className="mt-5 bg-white p-4 shadow-sm rounded-md" aria-live="polite">
-              <h2 className="text-lg font-semibold">{selectedPickup.name}で受け取れるもの</h2>
+              <div className="rounded-xl bg-white p-4 shadow-sm">
+                <h2 className="text-lg font-semibold">受け取れる商品</h2>
 
-              {itemsLoading && (
-                <p className="mt-3 text-sm text-gray-600">受け取れる商品を確認中…</p>
-              )}
+                {itemsLoading && (
+                  <p className="mt-3 text-sm text-gray-600">受け取れる商品を確認中…</p>
+                )}
 
-              {!itemsLoading && itemsError && (
-                <p className="mt-3 text-sm text-red-600">{itemsError}</p>
-              )}
+                {!itemsLoading && itemsError && (
+                  <div className="mt-3">
+                    <p className="text-sm text-red-600">{itemsError}</p>
+                    <button
+                      type="button"
+                      onClick={loadItems}
+                      className={`${secondaryButtonClass} mt-2`}
+                    >
+                      もう一度読み込む
+                    </button>
+                  </div>
+                )}
 
-              {!itemsLoading && !itemsError && matchedItems.length === 0 && (
-                <p className="mt-3 text-sm text-gray-600">
-                  現在この受取地点で受け取れる商品はありません。
-                </p>
-              )}
-
-              {!itemsLoading &&
-                !itemsError &&
-                matchedItems.length > 0 &&
-                timeFilteredItems.length === 0 && (
+                {!itemsLoading && !itemsError && matchedItems.length === 0 && (
                   <p className="mt-3 text-sm text-gray-600">
-                    この受取時間に受け取れる商品はありません。受取時間をずらすと見つかる場合があります。
+                    この受取地点で扱っている商品は、現在ありません。
                   </p>
                 )}
 
-              {!itemsLoading && !itemsError && timeFilteredItems.length > 0 && (
-                <ul className="mt-3 space-y-3">
-                  {timeFilteredItems.map((item) => (
-                    <li
-                      key={item.id}
-                      className="rounded border border-gray-200 p-3 flex items-center justify-between gap-3"
-                    >
-                      <div>
-                        <div className="font-medium">
-                          {item.title}
-                          {item.type === "experience" && (
-                            <span className="ml-2 text-xs text-gray-500">体験</span>
-                          )}
-                        </div>
-                        <div className="text-sm text-gray-600">{item.location_name}</div>
-                        <div className="text-sm mt-1">
-                          ¥{item.price}
-                          {item.stock > 0 ? `（残り${item.stock}）` : "（在庫切れ）"}
-                        </div>
-                        {/* ユーザーが選択した「受取時間」(上のセクション)とは別物と
-                            分かるよう、商品自体の営業時間であることを明示するラベル
-                            にする。片方でも未設定なら表示しない(既存のNULL扱いと
-                            同じ)。 */}
-                        {item.pickup_available_from && item.pickup_available_to && (
-                          <div className="text-xs text-gray-500 mt-1">
-                            商品受取可能時間: {formatPickupHours(item.pickup_available_from)}
-                            〜{formatPickupHours(item.pickup_available_to)}
+                {!itemsLoading &&
+                  !itemsError &&
+                  timeFilteredItems.length === 0 &&
+                  laterItems.length > 0 && (
+                    <p className="mt-3 rounded-lg bg-amber-50 p-3 text-sm text-amber-900">
+                      受取時間帯 {pickupWindowLabel} に受け取れる商品はありません。下の商品は、時間を変えると予約できます。
+                    </p>
+                  )}
+
+                {!itemsLoading && !itemsError && timeFilteredItems.length > 0 && (
+                  <ul className="mt-3 space-y-3">
+                    {timeFilteredItems.map((item) => (
+                      <li key={item.id} className="rounded-lg border border-gray-200 p-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="font-semibold">
+                              {item.title}
+                              {item.type === "experience" && (
+                                <span className="ml-2 text-xs font-normal text-gray-500">体験</span>
+                              )}
+                            </p>
+                            <p className="mt-1 text-xs text-gray-600">
+                              受取可能時間 {formatPickupHours(item.pickup_available_from)}〜
+                              {formatPickupHours(item.pickup_available_to)}
+                            </p>
                           </div>
+                          <div className="shrink-0 text-right">
+                            <p className="text-lg font-bold">{formatYen(item.price)}</p>
+                            <p
+                              className={`text-xs ${item.stock > 0 ? "text-gray-600" : "font-medium text-red-600"}`}
+                            >
+                              {item.stock > 0 ? `残り${item.stock}` : "在庫切れ"}
+                            </p>
+                          </div>
+                        </div>
+                        {item.stock > 0 && !isPickupWindowExpired ? (
+                          <Link
+                            to={`/reserve/${item.id}`}
+                            state={{
+                              origin: result.origin,
+                              destination: result.destination,
+                              passPoint: selectedPickup.name,
+                              passPointLat: selectedPickup.lat ?? undefined,
+                              passPointLng: selectedPickup.lng ?? undefined,
+                              pickupWindowStart: windowStartDate.toISOString(),
+                              pickupWindowEnd: windowEndDate.toISOString(),
+                            }}
+                            className={`${primaryButtonClass} mt-3`}
+                          >
+                            予約する
+                          </Link>
+                        ) : (
+                          <span
+                            aria-disabled="true"
+                            className="mt-3 flex min-h-[44px] w-full cursor-not-allowed items-center justify-center rounded-lg bg-gray-200 text-sm font-medium text-gray-500"
+                          >
+                            {item.stock > 0 ? "受取時間帯が終了しています" : "在庫切れ"}
+                          </span>
                         )}
-                      </div>
-                      {item.stock > 0 && !isPickupWindowExpired ? (
-                        <Link
-                          to={`/reserve/${item.id}`}
-                          state={{
-                            origin: result.origin,
-                            destination: result.destination,
-                            passPoint: selectedPickup.name,
-                            passPointLat: selectedPickup.lat ?? undefined,
-                            passPointLng: selectedPickup.lng ?? undefined,
-                            pickupWindowStart: windowStartDate.toISOString(),
-                            pickupWindowEnd: windowEndDate.toISOString(),
-                          }}
-                          className="shrink-0 rounded px-3 py-2 text-sm font-medium text-white bg-[#2f6f3e]"
+                      </li>
+                    ))}
+                  </ul>
+                )}
+
+                {!itemsLoading && !itemsError && laterItems.length > 0 && (
+                  <div className="mt-4">
+                    <h3 className="text-sm font-semibold text-gray-700">
+                      時間を変えると受け取れる商品
+                    </h3>
+                    <ul className="mt-2 space-y-3">
+                      {laterItems.map((item) => (
+                        <li
+                          key={item.id}
+                          className="rounded-lg border border-dashed border-gray-300 bg-gray-50 p-3"
                         >
-                          予約へ進む
-                        </Link>
-                      ) : (
-                        <span
-                          aria-disabled="true"
-                          className="shrink-0 rounded px-3 py-2 text-sm font-medium text-gray-500 bg-gray-200 cursor-not-allowed"
-                        >
-                          {item.stock > 0 ? "受取時間帯終了" : "在庫切れ"}
-                        </span>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </section>
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="font-semibold text-gray-700">{item.title}</p>
+                              <p className="mt-1 text-xs text-gray-600">
+                                受取可能時間 {formatPickupHours(item.pickup_available_from)}〜
+                                {formatPickupHours(item.pickup_available_to)}
+                              </p>
+                            </div>
+                            <div className="shrink-0 text-right">
+                              <p className="font-bold text-gray-700">{formatYen(item.price)}</p>
+                              <span className="mt-1 inline-block rounded bg-gray-200 px-2 py-0.5 text-[11px] text-gray-600">
+                                この時間は受取不可
+                              </span>
+                            </div>
+                          </div>
+                          <div className="mt-3">{laterItemAction(item)}</div>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+
+              <div className="rounded-xl bg-white p-4 shadow-sm">
+                <h2 className="text-base font-semibold">受取時間を変更</h2>
+                <p className="mt-1 text-xs text-gray-500">
+                  到着目安の前後3時間まで、30分単位でずらせます
+                </p>
+                <p className="mt-2 text-sm">
+                  受取時間帯 <span className="font-semibold">{pickupWindowLabel}</span>
+                </p>
+                <input
+                  type="range"
+                  min={-WINDOW_OFFSET_MAX_MINUTES}
+                  max={WINDOW_OFFSET_MAX_MINUTES}
+                  step={WINDOW_OFFSET_STEP_MINUTES}
+                  value={windowOffsetMinutes}
+                  onChange={(event) => setWindowOffsetMinutes(Number(event.target.value))}
+                  className="mt-2 h-11 w-full accent-[#2f6f3e]"
+                  aria-label="受取時間帯をずらす"
+                />
+                <div className="mt-1 grid grid-cols-3 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => shiftWindow(-WINDOW_OFFSET_STEP_MINUTES)}
+                    disabled={windowOffsetMinutes <= -WINDOW_OFFSET_MAX_MINUTES}
+                    className={secondaryButtonClass}
+                  >
+                    −30分
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setWindowOffsetMinutes(0)}
+                    disabled={windowOffsetMinutes === 0}
+                    className={secondaryButtonClass}
+                  >
+                    元に戻す
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => shiftWindow(WINDOW_OFFSET_STEP_MINUTES)}
+                    disabled={windowOffsetMinutes >= WINDOW_OFFSET_MAX_MINUTES}
+                    className={secondaryButtonClass}
+                  >
+                    ＋30分
+                  </button>
+                </div>
+              </div>
             </>
-            )}
-          </>
-        )}
-      </div>
-    </main>
+          )}
+        </section>
+      )}
+
+      <p className="mt-6 text-center">
+        <Link
+          to="/items"
+          className="inline-flex min-h-[44px] items-center text-sm text-[#2f6f3e] underline"
+        >
+          ルートを使わずに、すべての商品を見る
+        </Link>
+      </p>
+    </AppLayout>
   );
 }

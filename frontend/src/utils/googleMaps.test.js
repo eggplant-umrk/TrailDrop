@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildGoogleMapsUrl } from "./googleMaps";
+import { buildGoogleMapsPlaceUrl, buildGoogleMapsUrl } from "./googleMaps";
 
 function paramsOf(url) {
   const parsed = new URL(url);
@@ -47,5 +47,16 @@ describe("buildGoogleMapsUrl", () => {
   it("never includes an origin, so Google Maps starts from the device's current location", () => {
     const params = paramsOf(buildGoogleMapsUrl({ destination: "下呂温泉", passPoint: "道の駅A" }));
     expect(params).not.toHaveProperty("origin");
+  });
+});
+
+describe("buildGoogleMapsPlaceUrl", () => {
+  it("opens a place search for the pickup location only", () => {
+    const url = buildGoogleMapsPlaceUrl("道の駅 ロック・ガーデンひちそう");
+    expect(url.startsWith("https://www.google.com/maps/search/?")).toBe(true);
+    expect(Object.fromEntries(new URL(url).searchParams.entries())).toEqual({
+      api: "1",
+      query: "道の駅 ロック・ガーデンひちそう",
+    });
   });
 });
