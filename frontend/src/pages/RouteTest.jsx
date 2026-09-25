@@ -366,6 +366,16 @@ export default function RouteTest() {
   // model_validatorと同じ基準)。
   const isPickupWindowExpired = windowEndDate ? windowEndDate.getTime() <= Date.now() : false;
 
+  // 受取時間帯が終了したら「受取時間を変更」を開き、案内どおりすぐ操作できるように
+  // する。開くだけで自動では閉じない(操作中にパネルが閉じて下の要素が詰まり、
+  // 続けてのタップが別の要素に当たるのを防ぐため)。
+  const timeAdjustRef = useRef(null);
+  useEffect(() => {
+    if (isPickupWindowExpired && timeAdjustRef.current) {
+      timeAdjustRef.current.open = true;
+    }
+  }, [isPickupWindowExpired]);
+
   // 実効受取予定時刻(windowOffsetMinutesだけ通過予定時刻をずらした、実際に
   // 受取枠の中心となる瞬間)。商品の営業時間内判定だけはこの一点で行う。
   // 内部判定用の値のため、画面には表示しない。
@@ -771,7 +781,7 @@ export default function RouteTest() {
                       <p className="text-sm text-amber-900">
                         受取時間帯{" "}
                         <span className="whitespace-nowrap">{pickupWindowLabel}</span>{" "}
-                        に受け取れる商品はありません。
+                        <span className="inline-block">に受け取れる商品はありません。</span>
                       </p>
                       {laterAction && <div className="mt-2">{renderLaterAction()}</div>}
                     </div>
@@ -892,7 +902,7 @@ export default function RouteTest() {
                 )}
               </div>
 
-              <details className="group rounded-xl bg-white shadow-sm">
+              <details ref={timeAdjustRef} className="group rounded-xl bg-white shadow-sm">
                 <summary className="flex min-h-[48px] cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 [&::-webkit-details-marker]:hidden">
                   <span className="text-base font-semibold">受取時間を変更</span>
                   <span className="flex items-center gap-2 text-sm text-gray-600">
