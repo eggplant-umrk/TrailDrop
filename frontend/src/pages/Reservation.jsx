@@ -159,6 +159,10 @@ export default function Reservation() {
     origin: routeOrigin,
     destination: routeDestination,
     passPoint: routePassPoint,
+    // 受取地点の座標(route modeの候補のみ。無ければundefined)。Google Mapsの
+    // 経由地を正確にするためだけに完了画面へ引き継ぐ。
+    passPointLat: routePassPointLat,
+    passPointLng: routePassPointLng,
     // RouteTestで選択した受取時間帯(ISO文字列)。ItemListから直接来た場合は
     // undefinedのままで、origin等と同じく推測で補わない。
     pickupWindowStart,
@@ -306,6 +310,8 @@ export default function Reservation() {
         origin: routeOrigin,
         destination: routeDestination,
         passPoint: routePassPoint,
+        passPointLat: routePassPointLat,
+        passPointLng: routePassPointLng,
         pickupWindowStart,
         pickupWindowEnd,
       },
@@ -364,6 +370,8 @@ export default function Reservation() {
           origin: routeOrigin,
           destination: routeDestination,
           passPoint: routePassPoint,
+          passPointLat: routePassPointLat,
+          passPointLng: routePassPointLng,
         });
       }
 
@@ -372,7 +380,13 @@ export default function Reservation() {
         state: {
           access_token: res?.access_token || null,
           ...(hasRouteContext
-            ? { origin: routeOrigin, destination: routeDestination, passPoint: routePassPoint }
+            ? {
+                origin: routeOrigin,
+                destination: routeDestination,
+                passPoint: routePassPoint,
+                passPointLat: routePassPointLat,
+                passPointLng: routePassPointLng,
+              }
             : {}),
         },
       });
@@ -548,6 +562,8 @@ export default function Reservation() {
                     origin: routeOrigin,
                     destination: routeDestination,
                     passPoint: routePassPoint,
+                    passPointLat: routePassPointLat,
+                    passPointLng: routePassPointLng,
                     pickupWindowStart,
                     pickupWindowEnd,
                   },

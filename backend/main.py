@@ -22,7 +22,12 @@ from models import (
     StaffReservationResponse,
     StaffReservationSearchRequest,
 )
-from route_analysis import RouteAnalysisError, analyze_route
+from route_analysis import (
+    PickupLocation,
+    RouteAnalysisError,
+    analyze_route,
+    analyze_route_with_pickups,
+)
 
 load_dotenv()
 
@@ -258,6 +263,89 @@ def enforce_route_analysis_rate_limit(client_ip: str) -> None:
         _route_analysis_request_log[client_ip] = recent
 
 
+# 受取地点の選び方。fixed(既定・rollback用)は従来どおり七宗の固定地点を
+# 強制経由する。routeは利用者の実際の経路からpickup_locationsの候補を選ぶ
+# (route_analysis.py参照)。不明な値は安全側のfixedとして扱う。
+PICKUP_SELECTION_MODE_FIXED = "fixed"
+PICKUP_SELECTION_MODE_ROUTE = "route"
+DEFAULT_PICKUP_MAX_DISTANCE_METERS = 3000.0
+
+
+def get_pickup_selection_mode() -> str:
+    configured = os.getenv("PICKUP_SELECTION_MODE", PICKUP_SELECTION_MODE_FIXED).strip().lower()
+    if configured == PICKUP_SELECTION_MODE_ROUTE:
+        return PICKUP_SELECTION_MODE_ROUTE
+    return PICKUP_SELECTION_MODE_FIXED
+
+
+def get_pickup_max_distance_meters() -> float:
+    configured = os.getenv("PICKUP_MAX_DISTANCE_METERS")
+    if not configured:
+        return DEFAULT_PICKUP_MAX_DISTANCE_METERS
+    try:
+        value = float(configured)
+    except ValueError:
+        return DEFAULT_PICKUP_MAX_DISTANCE_METERS
+    # 0以下・NaN・Infinityなど意味を成さない値は既定値にする。
+    if not (0 < value < float("inf")):
+        return DEFAULT_PICKUP_MAX_DISTANCE_METERS
+    return value
+
+
+# route modeで使う受取地点(pickup_locationsのis_active=true)の短時間キャッシュ。
+# ルート分析のたびにDBを読まないようにする。受取地点は頻繁に変わらないため、
+# 数分遅れての反映で問題ない。取得に失敗した場合はキャッシュしない。
+PICKUP_LOCATIONS_CACHE_TTL_SECONDS = 300.0
+_pickup_locations_cache_lock = threading.Lock()
+_pickup_locations_cache: tuple[float, list[PickupLocation]] | None = None
+
+
+def _parse_pickup_location(row: dict) -> PickupLocation | None:
+    name = row.get("name")
+    lat = row.get("latitude")
+    lng = row.get("longitude")
+    if not isinstance(name, str) or not name:
+        return None
+    if isinstance(lat, bool) or isinstance(lng, bool):
+        return None
+    if not isinstance(lat, (int, float)) or not isinstance(lng, (int, float)):
+        return None
+    if not (-90 <= lat <= 90 and -180 <= lng <= 180):
+        return None
+    return PickupLocation(name=name, lat=float(lat), lng=float(lng))
+
+
+def get_active_pickup_locations() -> list[PickupLocation]:
+    global _pickup_locations_cache
+    now = time.monotonic()
+    with _pickup_locations_cache_lock:
+        if (
+            _pickup_locations_cache is not None
+            and now - _pickup_locations_cache[0] <= PICKUP_LOCATIONS_CACHE_TTL_SECONDS
+        ):
+            return _pickup_locations_cache[1]
+    try:
+        response = (
+            get_supabase()
+            .table("pickup_locations")
+            .select("name,latitude,longitude")
+            .eq("is_active", True)
+            .execute()
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="Failed to fetch pickup locations") from exc
+    locations = [
+        location
+        for location in (_parse_pickup_location(row) for row in response.data or [])
+        if location is not None
+    ]
+    with _pickup_locations_cache_lock:
+        _pickup_locations_cache = (time.monotonic(), locations)
+    return locations
+
+
 # 同一条件(origin/destination/departure_at)の短時間キャッシュ。連続クリックや
 # 同一条件の再試行でGoogle Routes APIを重複して呼ばないようにする。
 #
@@ -270,17 +358,39 @@ def enforce_route_analysis_rate_limit(client_ip: str) -> None:
 # 正しく同一条件と判定するための正規化であり、実際に異なる出発時刻を同一視する
 # ものではない(1秒でもずれれば別キーになる)。origin/destinationの表記や
 # departure_atの値そのものを書き換えたり丸めたりすることはない。
+# 加えて、受取地点の選び方(PICKUP_SELECTION_MODE・判定距離)と、「現在地を
+# 使う」で送られた出発地の座標もキーに含める。座標は小数第4位(約11m)に丸め、
+# ほぼ同じ地点からの再試行ではキャッシュを共有しつつ、離れた地点同士が衝突
+# しないようにする。このキャッシュはプロセス内メモリのみで、座標をDB・ログへ
+# 書くことはない。
 ROUTE_ANALYSIS_CACHE_TTL_SECONDS = 60.0
 # キャッシュのcleanupもレート制限と同じ考え方で、TTLと同じ間隔でしか全体を
 # 掃除しない。
 ROUTE_ANALYSIS_CACHE_CLEANUP_INTERVAL_SECONDS = ROUTE_ANALYSIS_CACHE_TTL_SECONDS
+ORIGIN_LOCATION_CACHE_DECIMALS = 4
+RouteAnalysisCacheKey = tuple
 _route_analysis_cache_lock = threading.Lock()
-_route_analysis_cache: dict[tuple[str, str, float], tuple[float, RouteAnalysisResponse]] = {}
+_route_analysis_cache: dict[RouteAnalysisCacheKey, tuple[float, RouteAnalysisResponse]] = {}
 _route_analysis_cache_last_cleanup = 0.0
 
 
-def _route_analysis_cache_key(request: RouteAnalysisRequest) -> tuple[str, str, float]:
-    return (request.origin, request.destination, request.departure_at.timestamp())
+def _route_analysis_cache_key(request: RouteAnalysisRequest) -> RouteAnalysisCacheKey:
+    origin_location = (
+        (
+            round(request.origin_location.lat, ORIGIN_LOCATION_CACHE_DECIMALS),
+            round(request.origin_location.lng, ORIGIN_LOCATION_CACHE_DECIMALS),
+        )
+        if request.origin_location is not None
+        else None
+    )
+    return (
+        get_pickup_selection_mode(),
+        get_pickup_max_distance_meters(),
+        request.origin,
+        request.destination,
+        request.departure_at.timestamp(),
+        origin_location,
+    )
 
 
 def _cleanup_route_analysis_cache_locked(now: float) -> None:
@@ -301,7 +411,7 @@ def _cleanup_route_analysis_cache_locked(now: float) -> None:
     _route_analysis_cache_last_cleanup = now
 
 
-def get_cached_route_analysis(key: tuple[str, str, float]) -> RouteAnalysisResponse | None:
+def get_cached_route_analysis(key: RouteAnalysisCacheKey) -> RouteAnalysisResponse | None:
     now = time.monotonic()
     with _route_analysis_cache_lock:
         _cleanup_route_analysis_cache_locked(now)
@@ -315,7 +425,7 @@ def get_cached_route_analysis(key: tuple[str, str, float]) -> RouteAnalysisRespo
         return cached_response
 
 
-def store_route_analysis_cache(key: tuple[str, str, float], response: RouteAnalysisResponse) -> None:
+def store_route_analysis_cache(key: RouteAnalysisCacheKey, response: RouteAnalysisResponse) -> None:
     with _route_analysis_cache_lock:
         _route_analysis_cache[key] = (time.monotonic(), response)
 
@@ -757,7 +867,17 @@ def analyze_route_endpoint(
         return cached_response
 
     try:
-        response = analyze_route(request, os.getenv("GOOGLE_MAPS_API_KEY"))
+        if get_pickup_selection_mode() == PICKUP_SELECTION_MODE_ROUTE:
+            # Google Routes APIの呼び出しはこの1回だけ。候補ごとの追加呼び出しは
+            # 行わず、取得済みの経路とDBの受取地点から候補を計算する。
+            response = analyze_route_with_pickups(
+                request,
+                os.getenv("GOOGLE_MAPS_API_KEY"),
+                get_active_pickup_locations(),
+                get_pickup_max_distance_meters(),
+            )
+        else:
+            response = analyze_route(request, os.getenv("GOOGLE_MAPS_API_KEY"))
     except RouteAnalysisError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 

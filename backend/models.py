@@ -1,7 +1,7 @@
 from datetime import datetime, time, timedelta, timezone
 from uuid import UUID
 
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # Frontendの氏名入力(Reservation.jsx、必須のtextフィールド)と揃える最大長。
 USER_NAME_MAX_LENGTH = 100
@@ -182,10 +182,20 @@ ROUTE_LOCATION_MIN_LENGTH = 1
 ROUTE_LOCATION_MAX_LENGTH = 200
 
 
+class LatLng(BaseModel):
+    # 範囲外・NaN/Infinityは422で拒否する。
+    lat: float = Field(ge=-90, le=90, allow_inf_nan=False)
+    lng: float = Field(ge=-180, le=180, allow_inf_nan=False)
+
+
 class RouteAnalysisRequest(BaseModel):
     origin: str
     destination: str
     departure_at: datetime
+    # RouteTestの「現在地を使う」で取得した端末の現在地。指定された場合は
+    # originの文字列(表示用ラベル)ではなくこの座標を出発地としてGoogleに
+    # 送る。DB保存・ログ出力はしない。
+    origin_location: LatLng | None = None
 
     @field_validator("origin", "destination")
     @classmethod
@@ -208,10 +218,29 @@ class RouteAnalysisRequest(BaseModel):
         return value
 
 
+class PickupCandidate(BaseModel):
+    """ルートから一定距離以内にある受取地点の候補(route mode)。"""
+
+    name: str
+    lat: float
+    lng: float
+    # ルート上で、この受取地点に最も近い地点への到着予定時刻(目安)。
+    # 受取地点への実際の寄り道時間は含まない。
+    pass_at: datetime
+    distance_from_route_meters: int
+
+
 class RouteAnalysisResponse(BaseModel):
     origin: str
     destination: str
-    pass_point: str
-    pass_at: datetime
+    # 選択中(初期値はルート上で最初に出会う候補)の受取地点。route modeで
+    # 候補が1件も無い場合はpass_point/pass_atともにNone(正常な結果)。
+    # fixed modeでは従来どおり七宗の固定地点(座標は持たないためlat/lngはNone)。
+    pass_point: str | None
+    pass_at: datetime | None
+    pass_point_lat: float | None = None
+    pass_point_lng: float | None = None
+    # route順に並んだ候補。fixed modeでは常に空。
+    pickup_candidates: list[PickupCandidate] = []
     total_duration_minutes: int
     total_distance_meters: int

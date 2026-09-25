@@ -2,6 +2,16 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import api from "../api/client";
 import { toUserMessage } from "../utils/errorMessages";
+import { getCurrentLocation } from "../utils/geolocation";
+import {
+  formatDistanceFromRoute,
+  normalizePickupCandidates,
+  selectPickupCandidate,
+} from "../utils/pickupCandidates";
+
+// 「現在地を使う」選択中に出発地として送る表示用ラベル。実際の出発地は
+// origin_location(座標)としてBackendへ送る。座標自体は保存しない。
+const CURRENT_LOCATION_LABEL = "現在地";
 
 // POST /routes/analyzeの失敗を日本語で案内する(Backend/route_analysis.pyの
 // detailは英語の内部向け文言のため、そのまま表示しない)。422のうち
@@ -124,16 +134,32 @@ const WINDOW_OFFSET_MAX_MINUTES = 180;
 export default function RouteTest() {
   // 起動時に1度だけ復元を試みる(TTL切れ・壊れたデータはnullになる)。
   const initialRouteState = loadRouteTestState();
-  const [origin, setOrigin] = useState(initialRouteState?.origin ?? "名古屋駅");
+  // 現在地の座標は保存しないため、「現在地」ラベルだけが復元された場合は
+  // 出発地を空に戻して手入力(または再取得)してもらう。
+  const [origin, setOrigin] = useState(
+    initialRouteState?.origin === CURRENT_LOCATION_LABEL
+      ? ""
+      : initialRouteState?.origin ?? "名古屋駅",
+  );
+  // 「現在地を使う」で取得した座標({lat, lng})。nullなら出発地は手入力の文字列。
+  const [originLocation, setOriginLocation] = useState(null);
+  const [locating, setLocating] = useState(false);
+  const [locationMessage, setLocationMessage] = useState(null);
   const [destination, setDestination] = useState(initialRouteState?.destination ?? "下呂温泉");
   const [departureAt, setDepartureAt] = useState(initialRouteState?.departureAt ?? "");
   const [result, setResult] = useState(initialRouteState?.result ?? null);
+  // 選択中の受取地点(候補のname)。候補の切り替えはAPIを呼ばず、取得済みの
+  // 候補(pass_at等)から画面を計算し直すだけ。
+  const [selectedPickupName, setSelectedPickupName] = useState(
+    initialRouteState?.selectedPickupName ?? null,
+  );
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
 
-  // 通過地点で受け取れる商品の一覧は、ルート分析結果とは別のライフサイクルを持つ
-  // (ルート分析は成功しているのに商品取得だけ失敗する、といったケースを区別するため)。
-  const [matchedItems, setMatchedItems] = useState([]);
+  // 商品一覧は、ルート分析結果とは別のライフサイクルを持つ(ルート分析は成功して
+  // いるのに商品取得だけ失敗する、といったケースを区別するため)。受取地点の
+  // 切り替えでAPIを呼ばないよう、全商品を1回だけ取得して地点名で絞り込む。
+  const [allItems, setAllItems] = useState([]);
   const [itemsLoading, setItemsLoading] = useState(false);
   const [itemsError, setItemsError] = useState(null);
 
@@ -147,8 +173,8 @@ export default function RouteTest() {
   // 分析結果を復元できた場合、商品一覧はGET /items(無料・軽量)だけ再実行
   // して埋め直す。Google Routes APIを再度呼ぶことはない。
   useEffect(() => {
-    if (initialRouteState?.result?.pass_point) {
-      loadMatchingItems(initialRouteState.result.pass_point);
+    if (normalizePickupCandidates(initialRouteState?.result).length > 0) {
+      loadItems();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -156,20 +182,24 @@ export default function RouteTest() {
   // 入力・分析結果・受取枠offsetが変わるたびに保存し直す(戻る操作・
   // リロード・別タブでの復元用)。
   useEffect(() => {
-    saveRouteTestState({ origin, destination, departureAt, result, windowOffsetMinutes });
-  }, [origin, destination, departureAt, result, windowOffsetMinutes]);
+    saveRouteTestState({
+      origin,
+      destination,
+      departureAt,
+      result,
+      windowOffsetMinutes,
+      selectedPickupName,
+    });
+  }, [origin, destination, departureAt, result, windowOffsetMinutes, selectedPickupName]);
 
-  async function loadMatchingItems(passPoint) {
+  async function loadItems() {
     setItemsLoading(true);
     setItemsError(null);
-    setMatchedItems([]);
+    setAllItems([]);
 
     try {
       const items = await api.getItems();
-      const matched = Array.isArray(items)
-        ? items.filter((item) => item.location_name === passPoint)
-        : [];
-      setMatchedItems(matched);
+      setAllItems(Array.isArray(items) ? items : []);
     } catch (itemsRequestError) {
       setItemsError(toUserMessage(itemsRequestError, { fallback: ITEMS_LOAD_ERROR_FALLBACK }));
     } finally {
@@ -183,17 +213,23 @@ export default function RouteTest() {
     setError(null);
     setResult(null);
     setItemsError(null);
-    setMatchedItems([]);
+    setAllItems([]);
     setWindowOffsetMinutes(0);
 
     try {
       const data = await api.analyzeRoute({
-        origin: origin.trim(),
+        origin: originLocation ? CURRENT_LOCATION_LABEL : origin.trim(),
         destination: destination.trim(),
         departure_at: `${departureAt}:00+09:00`,
+        origin_location: originLocation,
       });
       setResult(data);
-      await loadMatchingItems(data.pass_point);
+      // 初期選択はルート上で最初に出会う受取地点(候補はルート順)。
+      const candidates = normalizePickupCandidates(data);
+      setSelectedPickupName(candidates[0]?.name ?? null);
+      if (candidates.length > 0) {
+        await loadItems();
+      }
     } catch (requestError) {
       setError(
         toUserMessage(requestError, {
@@ -206,9 +242,41 @@ export default function RouteTest() {
     }
   }
 
-  // 受取枠(2時間固定)は、通過予定時刻を中心にwindowOffsetMinutesだけずらした
-  // ものとして毎レンダー計算する派生値。専用のstateは持たない。
-  const passAtDate = result ? new Date(result.pass_at) : null;
+  async function handleUseCurrentLocation() {
+    setLocating(true);
+    setLocationMessage(null);
+    try {
+      const location = await getCurrentLocation();
+      setOriginLocation(location);
+    } catch (locationError) {
+      // 拒否・未対応・取得失敗のいずれも、従来の出発地テキスト入力へ戻す。
+      setOriginLocation(null);
+      setLocationMessage(locationError.userMessage || locationError.message);
+    } finally {
+      setLocating(false);
+    }
+  }
+
+  function handleClearCurrentLocation() {
+    setOriginLocation(null);
+    setLocationMessage(null);
+  }
+
+  function handleSelectPickup(name) {
+    setSelectedPickupName(name);
+    // 到着目安が変わるため、受取枠は選んだ地点の到着目安を中心に戻す。
+    setWindowOffsetMinutes(0);
+  }
+
+  const pickupCandidates = normalizePickupCandidates(result);
+  const selectedPickup = selectPickupCandidate(pickupCandidates, selectedPickupName);
+  const matchedItems = selectedPickup
+    ? allItems.filter((item) => item.location_name === selectedPickup.name)
+    : [];
+
+  // 受取枠(2時間固定)は、選択中の受取地点の到着目安を中心にwindowOffsetMinutes
+  // だけずらしたものとして毎レンダー計算する派生値。専用のstateは持たない。
+  const passAtDate = selectedPickup ? new Date(selectedPickup.pass_at) : null;
   const windowStartDate = passAtDate
     ? new Date(
         passAtDate.getTime() +
@@ -248,20 +316,55 @@ export default function RouteTest() {
       <div className="mx-auto max-w-xl">
         <header className="mb-6">
           <h1 className="text-2xl font-semibold">ルート分析</h1>
-          <p className="mt-1 text-sm text-gray-600">七宗の通過予定時刻を確認</p>
+          <p className="mt-1 text-sm text-gray-600">
+            ルートの近くにある受取地点と、到着の目安を確認できます
+          </p>
         </header>
 
         <form onSubmit={handleSubmit} className="space-y-4 bg-white p-4 shadow-sm rounded-md">
-          <label className="block">
-            <span className="text-sm font-medium">出発地</span>
-            <input
-              type="text"
-              value={origin}
-              onChange={(event) => setOrigin(event.target.value)}
-              required
-              className="mt-1 w-full rounded border border-gray-300 p-2"
-            />
-          </label>
+          <div>
+            {originLocation ? (
+              <div>
+                <span className="text-sm font-medium">出発地</span>
+                <div className="mt-1 flex items-center justify-between gap-2 rounded border border-[#2f6f3e] bg-[#f7fbf6] p-2">
+                  <span className="text-sm">現在地を使用します</span>
+                  <button
+                    type="button"
+                    onClick={handleClearCurrentLocation}
+                    className="text-sm text-[#2f6f3e] underline"
+                  >
+                    入力に戻す
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <label className="block">
+                <span className="text-sm font-medium">出発地</span>
+                <input
+                  type="text"
+                  value={origin}
+                  onChange={(event) => setOrigin(event.target.value)}
+                  required
+                  className="mt-1 w-full rounded border border-gray-300 p-2"
+                />
+              </label>
+            )}
+            {!originLocation && (
+              <button
+                type="button"
+                onClick={handleUseCurrentLocation}
+                disabled={locating}
+                className="mt-2 text-sm text-[#2f6f3e] underline disabled:text-gray-400"
+              >
+                {locating ? "現在地を取得中…" : "現在地を使う"}
+              </button>
+            )}
+            {locationMessage && (
+              <p className="mt-1 text-sm text-red-600" role="alert">
+                {locationMessage}
+              </p>
+            )}
+          </div>
 
           <label className="block">
             <span className="text-sm font-medium">目的地</span>
@@ -303,14 +406,68 @@ export default function RouteTest() {
             <section className="mt-5 bg-white p-4 shadow-sm rounded-md" aria-live="polite">
               <h2 className="text-lg font-semibold">分析結果</h2>
               <dl className="mt-3 space-y-3">
-                <div>
-                  <dt className="text-sm text-gray-600">七宗通過予定時刻</dt>
-                  <dd className="font-medium">{formatJapanDateTime(result.pass_at)}</dd>
-                </div>
-                <div>
-                  <dt className="text-sm text-gray-600">通過地点</dt>
-                  <dd className="font-medium">{result.pass_point}</dd>
-                </div>
+                {pickupCandidates.length === 0 ? (
+                  <div>
+                    <dt className="text-sm text-gray-600">受取地点</dt>
+                    <dd className="mt-1 text-sm">
+                      このルートの近くには受取地点が見つかりませんでした。出発地・目的地を変えてお試しください。
+                    </dd>
+                  </div>
+                ) : (
+                  <>
+                    <div>
+                      <dt className="text-sm text-gray-600">受取地点</dt>
+                      {pickupCandidates.length === 1 ? (
+                        <dd className="font-medium">{selectedPickup.name}</dd>
+                      ) : (
+                        <dd>
+                          <p className="text-xs text-gray-500">
+                            ルートの近くに受取地点が{pickupCandidates.length}か所あります（ルート上の順）。受け取る地点を選んでください。
+                          </p>
+                          <fieldset className="mt-2 space-y-2">
+                            <legend className="sr-only">受取地点を選択</legend>
+                            {pickupCandidates.map((candidate) => (
+                              <label
+                                key={candidate.name}
+                                className={`flex items-start gap-2 rounded border p-2 ${
+                                  candidate.name === selectedPickup.name
+                                    ? "border-[#2f6f3e] bg-[#f7fbf6]"
+                                    : "border-gray-200"
+                                }`}
+                              >
+                                <input
+                                  type="radio"
+                                  name="pickup-location"
+                                  value={candidate.name}
+                                  checked={candidate.name === selectedPickup.name}
+                                  onChange={() => handleSelectPickup(candidate.name)}
+                                  className="mt-1"
+                                />
+                                <span>
+                                  <span className="block font-medium">{candidate.name}</span>
+                                  <span className="block text-xs text-gray-600">
+                                    到着目安 {formatJapanTime(new Date(candidate.pass_at))}
+                                    {formatDistanceFromRoute(candidate.distance_from_route_meters) &&
+                                      `・${formatDistanceFromRoute(candidate.distance_from_route_meters)}`}
+                                  </span>
+                                </span>
+                              </label>
+                            ))}
+                          </fieldset>
+                        </dd>
+                      )}
+                    </div>
+                    <div>
+                      <dt className="text-sm text-gray-600">到着目安</dt>
+                      <dd className="font-medium">{formatJapanDateTime(selectedPickup.pass_at)}</dd>
+                      {selectedPickup.distance_from_route_meters !== null && (
+                        <dd className="mt-1 text-xs text-gray-500">
+                          ルート上で受取地点に最も近い地点への到着予定時刻です（{formatDistanceFromRoute(selectedPickup.distance_from_route_meters)}）。受取地点までの寄り道の時間は含みません。
+                        </dd>
+                      )}
+                    </div>
+                  </>
+                )}
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <dt className="text-sm text-gray-600">総移動時間</dt>
@@ -326,9 +483,11 @@ export default function RouteTest() {
               </dl>
             </section>
 
+            {selectedPickup && (
+            <>
             <section className="mt-5 bg-white p-4 shadow-sm rounded-md">
               <h2 className="text-lg font-semibold">受取時間を設定</h2>
-              <p className="mt-1 text-xs text-gray-500">通過予定時刻の前後で調整できます</p>
+              <p className="mt-1 text-xs text-gray-500">到着目安の前後で調整できます</p>
               <p className="mt-1 text-sm text-gray-600">
                 受取時間: {formatJapanTime(windowStartDate)}〜{formatJapanTime(windowEndDate)}
               </p>
@@ -358,13 +517,13 @@ export default function RouteTest() {
                   onClick={() => setWindowOffsetMinutes(0)}
                   className="mt-2 text-sm text-[#2f6f3e] underline"
                 >
-                  通過予定時刻を中心に戻す
+                  到着目安を中心に戻す
                 </button>
               )}
             </section>
 
             <section className="mt-5 bg-white p-4 shadow-sm rounded-md" aria-live="polite">
-              <h2 className="text-lg font-semibold">このルートで受け取れるもの</h2>
+              <h2 className="text-lg font-semibold">{selectedPickup.name}で受け取れるもの</h2>
 
               {itemsLoading && (
                 <p className="mt-3 text-sm text-gray-600">受け取れる商品を確認中…</p>
@@ -376,7 +535,7 @@ export default function RouteTest() {
 
               {!itemsLoading && !itemsError && matchedItems.length === 0 && (
                 <p className="mt-3 text-sm text-gray-600">
-                  現在このルートで受け取れる商品はありません。
+                  現在この受取地点で受け取れる商品はありません。
                 </p>
               )}
 
@@ -425,7 +584,9 @@ export default function RouteTest() {
                           state={{
                             origin: result.origin,
                             destination: result.destination,
-                            passPoint: result.pass_point,
+                            passPoint: selectedPickup.name,
+                            passPointLat: selectedPickup.lat ?? undefined,
+                            passPointLng: selectedPickup.lng ?? undefined,
                             pickupWindowStart: windowStartDate.toISOString(),
                             pickupWindowEnd: windowEndDate.toISOString(),
                           }}
@@ -446,6 +607,8 @@ export default function RouteTest() {
                 </ul>
               )}
             </section>
+            </>
+            )}
           </>
         )}
       </div>
