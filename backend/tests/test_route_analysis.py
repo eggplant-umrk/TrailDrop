@@ -253,6 +253,28 @@ class TestRouteAnalyzeEndpointAuth:
         assert response.status_code == 200
         assert response.json()["total_duration_minutes"] == 42
 
+    # 非ASCIIのキーは、secrets.compare_digest(str, str)のTypeErrorで500になって
+    # いた。生のUTF-8バイトでヘッダを送り、通常の認証失敗(401)になることを確認する。
+    @pytest.mark.parametrize("raw_key", ["キー".encode("utf-8"), b"test-client-key\xff"])
+    def test_non_ascii_client_key_is_rejected_with_401(self, client, raw_key):
+        response = client.post(
+            "/routes/analyze", json=VALID_PAYLOAD, headers={"X-Client-Key": raw_key}
+        )
+        assert response.status_code == 401
+        assert response.json()["detail"] == "Invalid route analysis client key"
+
+
+class TestSecretMatches:
+    def test_equal_ascii_values_match(self):
+        assert main.secret_matches("test-client-key", "test-client-key") is True
+
+    def test_different_ascii_values_do_not_match(self):
+        assert main.secret_matches("wrong", "test-client-key") is False
+
+    @pytest.mark.parametrize("provided", ["キー", "test-client-keyÿ", "\ud800"])
+    def test_non_ascii_or_lone_surrogate_does_not_raise(self, provided):
+        assert main.secret_matches(provided, "test-client-key") is False
+
 
 class TestRouteAnalyzeEndpointValidation:
     @pytest.mark.parametrize("origin", ["", "   "])

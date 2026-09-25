@@ -11,6 +11,17 @@ import {
   saveFinalizedStatus,
 } from "../utils/reservationAccess";
 import { loadRouteContext } from "../utils/routeContext";
+import { toUserMessage } from "../utils/errorMessages";
+
+// 初回読み込み(予約照会)の失敗も、Backendの英文detail("Reservation not
+// found"等)をそのまま出さない。GET /reservations/{id}は本番・DEMO_MODEとも、
+// 予約IDの誤り・トークンの不一致/欠落をすべて404で返す。
+const MISSING_TOKEN_MESSAGE =
+  "この端末には予約の確認に必要な情報が保存されていません。予約した端末・ブラウザで開いてください。";
+const FETCH_ERROR_BY_STATUS = {
+  404: "予約が見つかりませんでした。URLが正しいか、予約した端末・ブラウザで開いているかをご確認ください。",
+};
+const FETCH_ERROR_FALLBACK = "予約情報の取得に失敗しました。時間をおいて、もう一度お試しください。";
 
 function formatRequestedAt(value) {
   return new Intl.DateTimeFormat("ja-JP", {
@@ -102,7 +113,7 @@ const UNKNOWN_STATUS_DISPLAY = {
 
 // 更新ボタンの再取得失敗は、fetchやHTTPの生のエラー文言(英語になり得る)を
 // そのまま出さず、常にこの固定文言を表示する。初回読み込みの失敗(initialError)
-// はこれまで通りe.messageを表示する。
+// はtoUserMessageでstatus別の日本語にする。
 const REFRESH_ERROR_MESSAGE =
   "最新の状態を取得できませんでした。通信環境を確認して再度お試しください。";
 
@@ -206,7 +217,9 @@ export default function ReservationComplete() {
           return;
         }
         if (import.meta.env.VITE_API_BASE_URL) {
-          throw new Error("予約トークンが見つかりません");
+          const missingTokenError = new Error(MISSING_TOKEN_MESSAGE);
+          missingTokenError.userMessage = MISSING_TOKEN_MESSAGE;
+          throw missingTokenError;
         }
       }
 
@@ -228,7 +241,9 @@ export default function ReservationComplete() {
     } catch (e) {
       if (!mountedRef.current) return;
       if (isInitial) {
-        setInitialError(e.message || "予約情報の取得に失敗しました");
+        setInitialError(
+          toUserMessage(e, { byStatus: FETCH_ERROR_BY_STATUS, fallback: FETCH_ERROR_FALLBACK }),
+        );
       } else {
         setRefreshError(REFRESH_ERROR_MESSAGE);
       }

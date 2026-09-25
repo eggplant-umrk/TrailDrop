@@ -131,6 +131,21 @@ def record_staff_auth_failure(client_ip: str) -> None:
         _staff_auth_failure_log[client_ip] = recent
 
 
+def secret_matches(provided: str, expected: str) -> bool:
+    """定数時間で秘密値を比較する。
+
+    secrets.compare_digestはstr同士だとASCII文字しか受け付けず、非ASCII文字
+    (ヘッダに生のUTF-8バイトを送られた場合など)でTypeErrorになり500を返して
+    しまう。両方をbytesにしてから比較し、どんな入力でも通常の不一致(False)
+    として扱えるようにする。surrogatepassは孤立surrogateを含むstrでも
+    UnicodeEncodeErrorを起こさないため。
+    """
+    return secrets.compare_digest(
+        provided.encode("utf-8", "surrogatepass"),
+        expected.encode("utf-8", "surrogatepass"),
+    )
+
+
 def require_staff_token(token: str | None, client_ip: str) -> None:
     check_staff_auth_rate_limit(client_ip)
     expected_token = os.getenv("STAFF_API_TOKEN")
@@ -138,7 +153,7 @@ def require_staff_token(token: str | None, client_ip: str) -> None:
         # サーバー側の設定不備であり、クライアントの認証失敗ではないため
         # 失敗回数には数えない。
         raise HTTPException(status_code=503, detail="Staff authentication is not configured")
-    if not token or not secrets.compare_digest(token, expected_token):
+    if not token or not secret_matches(token, expected_token):
         record_staff_auth_failure(client_ip)
         raise HTTPException(status_code=401, detail="Invalid staff token")
 
@@ -190,7 +205,7 @@ def require_route_analysis_client_key(client_key: str | None) -> None:
         raise HTTPException(
             status_code=503, detail="Route analysis authentication is not configured"
         )
-    if not client_key or not secrets.compare_digest(client_key, expected_key):
+    if not client_key or not secret_matches(client_key, expected_key):
         raise HTTPException(status_code=401, detail="Invalid route analysis client key")
 
 
@@ -616,17 +631,22 @@ STAFF_SEARCH_MAX_RESULTS = 20
 
 
 # PMレビューm-3: ilikeのパターン中でユーザー入力がそのままワイルドカード
-# として解釈されないようにエスケープする。対象は、SQLのLIKE/ILIKEが特別
-# 扱いする"%"・"_"、PostgRESTがilikeのURL値中で"%"の代わりとして解釈する
-# "*"、そしてエスケープ文字そのものである"\"(先にエスケープしないと、後段
-# で挿入する"\"と衝突して意図しない解釈になる)。デフォルトのSQL ESCAPE文字
-# は"\"のため、追加のESCAPE句指定は不要。
+# として解釈されないようにエスケープする。SQLのLIKE/ILIKEが特別扱いする
+# "%"・"_"と、エスケープ文字そのものである"\"(先にエスケープしないと、後段
+# で挿入する"\"と衝突して意図しない解釈になる)は"\"でエスケープする。
+# デフォルトのSQL ESCAPE文字は"\"のため、追加のESCAPE句指定は不要。
+#
+# "*"だけはエスケープできない: PostgRESTはlike/ilikeのpattern中の"*"を
+# 無条件に"%"へ置き換える(以前の"\*"は"\%"=リテラルの"%"になっていた)。
+# そのため"*"は任意の1文字を表す"_"に置き換えてDBで候補を絞り、
+# search_staff_reservations側で「"*"を文字どおり含む」予約だけに絞り込む
+# (search_staff_reservations内の後段フィルタ)。
 def escape_ilike_wildcards(value: str) -> str:
     return (
         value.replace("\\", "\\\\")
         .replace("%", "\\%")
         .replace("_", "\\_")
-        .replace("*", "\\*")
+        .replace("*", "_")
     )
 
 
@@ -658,6 +678,14 @@ def search_staff_reservations(
             .execute()
         )
         reservations = response.data or []
+        if "*" in trimmed_query:
+            # "*"はDB側では任意の1文字("_")として検索しているため、ここで
+            # 「"*"を文字どおり含む」予約だけに絞る。"**"のようなワイルド
+            # カードだけの検索で無関係な予約が一覧化されることも防ぐ。
+            needle = trimmed_query.casefold()
+            reservations = [
+                r for r in reservations if needle in str(r.get("user_name") or "").casefold()
+            ]
 
         # item_titleの解決はget_staff_reservationと同じ「失敗しても予約情報
         # 自体は返す」方針。N+1を避けるため、対象item_idをまとめて1回で取得

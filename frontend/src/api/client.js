@@ -55,7 +55,11 @@ async function request(path, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
     // Reservation.jsxのDEFINITELY_NOT_CREATED_STATUSESにstatus無しは含まれ
     // ないため、既存の曖昧な失敗の扱いにそのまま乗る。
     if (e?.name === "AbortError") {
-      throw new Error(TIMEOUT_ERROR_MESSAGE);
+      const timeoutError = new Error(TIMEOUT_ERROR_MESSAGE);
+      // 既に日本語の利用者向け文言なので、utils/errorMessages.jsのtoUserMessage
+      // でもそのまま表示する。
+      timeoutError.userMessage = TIMEOUT_ERROR_MESSAGE;
+      throw timeoutError;
     }
     throw e;
   } finally {
@@ -74,6 +78,12 @@ async function request(path, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
     const err = new Error(msg);
     err.status = res.status;
     err.body = json;
+    // FastAPIのバリデーションエラー(detailが配列)は、errorMessage()で既に
+    // 日本語化している。英語のdetail文字列はここでは日本語化せず、各画面が
+    // toUserMessage(utils/errorMessages.js)で変換する。
+    if (Array.isArray(json?.detail)) {
+      err.userMessage = msg;
+    }
     throw err;
   }
 
@@ -193,11 +203,13 @@ export async function getReservation(reservationId, reservationToken) {
         throw err;
       }
       // Require a reservationToken and validate it against stored access_token.
-      // Previously the check skipped validation when reservationToken was missing,
-      // allowing anonymous access to demo reservations. Enforce presence and match.
+      // A missing/mismatched token returns the same 404 "Reservation not found"
+      // as an unknown id, exactly like the real GET /reservations/{id}
+      // (main.py) and cancelReservation() below, so the id's existence can't
+      // be probed and both modes share one error contract.
       if (!reservationToken || res.access_token !== reservationToken) {
-        const err = new Error("Invalid reservation token");
-        err.status = 401;
+        const err = new Error("Reservation not found");
+        err.status = 404;
         throw err;
       }
       const { access_token: _accessToken, ...response } = res;

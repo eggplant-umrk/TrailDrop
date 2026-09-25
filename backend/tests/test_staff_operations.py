@@ -12,6 +12,7 @@
 """
 
 import pathlib
+import re
 import sys
 from copy import deepcopy
 from uuid import uuid4
@@ -43,6 +44,30 @@ class FakeQueryResult:
         self.data = data
 
 
+def postgrest_ilike_regex(pattern):
+    """Compile an ilike pattern the way PostgREST + PostgreSQL evaluate it:
+    PostgREST first turns every "*" into "%" (there is no escape for "*"),
+    then ILIKE treats "%" / "_" as wildcards, "\\" as the escape character,
+    and matches case-insensitively against the whole value."""
+    pattern = pattern.replace("*", "%")
+    parts = []
+    i = 0
+    while i < len(pattern):
+        char = pattern[i]
+        if char == "\\" and i + 1 < len(pattern):
+            parts.append(re.escape(pattern[i + 1]))
+            i += 2
+            continue
+        if char == "%":
+            parts.append(".*")
+        elif char == "_":
+            parts.append(".")
+        else:
+            parts.append(re.escape(char))
+        i += 1
+    return re.compile("".join(parts), re.IGNORECASE | re.DOTALL)
+
+
 class FakeReservationsTable:
     """Just enough of the query builder for search_staff_reservations:
     select().ilike().order().limit().execute().
@@ -59,11 +84,9 @@ class FakeReservationsTable:
     def ilike(self, field, pattern):
         if self._on_ilike is not None:
             # Records the exact pattern main.py built (post-escaping), so
-            # tests can assert on it directly instead of relying on this
-            # fake's simplistic substring matching below.
+            # tests can assert on it directly.
             self._on_ilike(pattern)
-        needle = pattern.strip("%").lower()
-        self._ilike = (field, needle)
+        self._ilike = (field, postgrest_ilike_regex(pattern))
         return self
 
     def order(self, _field, desc=False):
@@ -73,7 +96,8 @@ class FakeReservationsTable:
         matches = [
             r
             for r in self.rows.values()
-            if self._ilike is None or self._ilike[1] in str(r.get(self._ilike[0], "")).lower()
+            if self._ilike is None
+            or self._ilike[1].fullmatch(str(r.get(self._ilike[0], "")))
         ]
         self._limited = matches[:n]
         return self
@@ -372,7 +396,7 @@ class TestSearchStaffReservations:
         )
         assert response.status_code == 405
 
-    @pytest.mark.parametrize("raw_char", ["%", "_", "*", "\\"])
+    @pytest.mark.parametrize("raw_char", ["%", "_", "\\"])
     def test_ilike_wildcard_characters_are_escaped_before_querying(
         self, client, fake_supabase, raw_char
     ):
@@ -403,11 +427,8 @@ class TestSearchStaffReservations:
     def test_wildcard_query_does_not_match_unrelated_names(self, client, fake_supabase):
         # ワイルドカードとして解釈されてしまうと"%"だけで全件ヒットして
         # しまうが、エスケープにより「"%"という文字自体」を含む名前としてしか
-        # 一致しないことを確認する(実際のPostgRESTのESCAPE解釈は
-        # FakeReservationsTableでは再現しないため、ここではエスケープされた
-        # patternが送られていること自体をtest_ilike_wildcard_characters_are_
-        # escaped_before_queryingで検証し、こちらは素朴な"%"単体クエリが
-        # 無関係な氏名にヒットしないことをアプリ層の意図として確認する)。
+        # 一致しないことを確認する(FakeReservationsTableはpostgrest_ilike_regex
+        # でPostgREST/PostgreSQLのilike解釈を再現している)。
         reservation = make_reservation(user_name="山田太郎")
         fake_supabase.reservations[reservation["id"]] = reservation
 
@@ -420,6 +441,73 @@ class TestSearchStaffReservations:
         assert response.status_code == 200
         pattern = fake_supabase.last_ilike_pattern
         assert pattern == "%\\%\\%%"
+        assert response.json() == []
+
+    def test_asterisk_is_never_sent_to_postgrest(self, client, fake_supabase):
+        # PostgRESTはlike/ilikeのpattern中の"*"を無条件に"%"として扱い、
+        # エスケープ手段が無い。"\\*"も"\\%"(=リテラルの%)になってしまうため、
+        # "*"はpatternに一切含めない。
+        response = client.post(
+            "/staff/reservations-search",
+            json={"user_name": "名前*花子"},
+            headers={"X-Staff-Token": "test-staff-token"},
+        )
+
+        assert response.status_code == 200
+        pattern = fake_supabase.last_ilike_pattern
+        assert "*" not in pattern
+        assert pattern == "%名前_花子%"
+
+    def test_asterisk_query_matches_only_names_containing_a_literal_asterisk(
+        self, client, fake_supabase
+    ):
+        literal = make_reservation(user_name="名前*花子")
+        other = make_reservation(user_name="名前X花子")
+        for reservation in (literal, other):
+            fake_supabase.reservations[reservation["id"]] = reservation
+
+        response = client.post(
+            "/staff/reservations-search",
+            json={"user_name": "名前*花子"},
+            headers={"X-Staff-Token": "test-staff-token"},
+        )
+
+        assert response.status_code == 200
+        assert [r["id"] for r in response.json()] == [literal["id"]]
+
+    @pytest.mark.parametrize("query", ["**", "*_", "%*", "__"])
+    def test_wildcard_only_queries_do_not_enumerate_reservations(
+        self, client, fake_supabase, query
+    ):
+        # 2文字の最小長を満たしてしまうワイルドカードだけの検索で、無関係な
+        # 予約が一覧化されないこと。
+        for name in ("山田太郎", "佐藤花子", "ab"):
+            reservation = make_reservation(user_name=name)
+            fake_supabase.reservations[reservation["id"]] = reservation
+
+        response = client.post(
+            "/staff/reservations-search",
+            json={"user_name": query},
+            headers={"X-Staff-Token": "test-staff-token"},
+        )
+
+        assert response.status_code == 200
+        assert response.json() == []
+
+    def test_normal_partial_search_is_case_insensitive_and_unaffected(
+        self, client, fake_supabase
+    ):
+        reservation = make_reservation(user_name="Yamada Taro")
+        fake_supabase.reservations[reservation["id"]] = reservation
+
+        response = client.post(
+            "/staff/reservations-search",
+            json={"user_name": "yamada"},
+            headers={"X-Staff-Token": "test-staff-token"},
+        )
+
+        assert response.status_code == 200
+        assert [r["id"] for r in response.json()] == [reservation["id"]]
 
 
 class TestStaffAuthRateLimit:
@@ -497,3 +585,39 @@ class TestStaffAuthRateLimit:
 
         # A different IP is unaffected by the first IP's failures.
         main.require_staff_token("test-staff-token", "203.0.113.2")
+
+
+class TestStaffTokenNonAscii:
+    """Non-ASCII X-Staff-Token values used to raise TypeError inside
+    secrets.compare_digest (500). They must be an ordinary auth failure."""
+
+    @pytest.mark.parametrize("raw_token", ["トークン".encode("utf-8"), b"test-staff-token\xff"])
+    def test_non_ascii_token_returns_401_on_every_staff_endpoint(
+        self, client, fake_supabase, raw_token
+    ):
+        headers = {"X-Staff-Token": raw_token}
+        responses = [
+            client.post("/qr/verify", json={"qr_token": str(uuid4())}, headers=headers),
+            client.get(f"/staff/reservations/{uuid4()}", headers=headers),
+            client.post("/staff/reservations-search", json={"user_name": "山田"}, headers=headers),
+            client.post("/staff/reservations/expire-stale", headers=headers),
+        ]
+
+        assert [r.status_code for r in responses] == [401, 401, 401, 401]
+        assert all(r.json()["detail"] == "Invalid staff token" for r in responses)
+
+    def test_non_ascii_token_counts_as_a_failed_attempt(self, fake_supabase):
+        for _ in range(main.STAFF_AUTH_RATE_LIMIT):
+            with pytest.raises(main.HTTPException) as exc_info:
+                main.require_staff_token("トークン", "203.0.113.60")
+            assert exc_info.value.status_code == 401
+
+        with pytest.raises(main.HTTPException) as exc_info:
+            main.require_staff_token("トークン", "203.0.113.60")
+
+        assert exc_info.value.status_code == 429
+
+    def test_valid_token_still_succeeds(self, fake_supabase):
+        main.require_staff_token("test-staff-token", "203.0.113.61")
+
+        assert "203.0.113.61" not in main._staff_auth_failure_log

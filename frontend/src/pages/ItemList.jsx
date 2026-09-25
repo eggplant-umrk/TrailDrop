@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import api from "../api/client";
+import { toUserMessage } from "../utils/errorMessages";
 
 function mapItem(serverItem) {
   return {
@@ -42,7 +43,11 @@ export default function ItemList() {
         const mapped = Array.isArray(demo) ? demo.map(mapItem) : [];
         setItems(mapped);
       } else {
-        setError(e.message || "Failed to load items");
+        setError(
+          toUserMessage(e, {
+            fallback: "商品一覧を取得できませんでした。時間をおいて、もう一度お試しください。",
+          }),
+        );
       }
     } finally {
       setLoading(false);
