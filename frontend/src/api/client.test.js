@@ -93,6 +93,95 @@ describe("getReservation error contract (DEMO_MODE matches the real API)", () =>
   });
 });
 
+describe("analyzeRoute pickup candidates", () => {
+  const departure = "2999-01-01T09:00:00+09:00";
+
+  it("DEMO_MODE returns one pickup candidate and keeps the existing pass_point/pass_at contract", async () => {
+    const api = await loadClient({ VITE_DEMO_MODE: "true", VITE_API_BASE_URL: "" });
+
+    const result = await api.analyzeRoute({
+      origin: "名古屋駅",
+      destination: "下呂温泉",
+      departure_at: departure,
+    });
+
+    expect(result.pass_point).toBe("道の駅 ロック・ガーデンひちそう");
+    expect(result.pass_at).toBe(new Date(Date.parse(departure) + 60 * 60000).toISOString());
+    expect(result.pickup_candidates).toEqual([
+      {
+        name: result.pass_point,
+        lat: null,
+        lng: null,
+        pass_at: result.pass_at,
+        distance_from_route_meters: 0,
+      },
+    ]);
+    // DEMOは実在地点の座標を持たない(未確認の座標を使わない)。
+    expect(result.pass_point_lat).toBeNull();
+    expect(result.pass_point_lng).toBeNull();
+  });
+
+  it("DEMO_MODE accepts origin_location without breaking", async () => {
+    const api = await loadClient({ VITE_DEMO_MODE: "true", VITE_API_BASE_URL: "" });
+
+    const result = await api.analyzeRoute({
+      origin: "現在地",
+      destination: "下呂温泉",
+      departure_at: departure,
+      origin_location: { lat: 35.17, lng: 136.88 },
+    });
+
+    expect(result.pickup_candidates).toHaveLength(1);
+  });
+
+  async function sentBody(args) {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse(200, { pass_point: null, pass_at: null, pickup_candidates: [] }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadClient({ VITE_DEMO_MODE: "false", VITE_API_BASE_URL: "http://api.test" });
+    await api.analyzeRoute(args);
+    return JSON.parse(fetchMock.mock.calls[0][1].body);
+  }
+
+  it("sends origin_location only when the current location is used", async () => {
+    const withLocation = await sentBody({
+      origin: "現在地",
+      destination: "下呂温泉",
+      departure_at: departure,
+      origin_location: { lat: 35.17, lng: 136.88 },
+    });
+    expect(withLocation).toEqual({
+      origin: "現在地",
+      destination: "下呂温泉",
+      departure_at: departure,
+      origin_location: { lat: 35.17, lng: 136.88 },
+    });
+
+    const withoutLocation = await sentBody({
+      origin: "名古屋駅",
+      destination: "下呂温泉",
+      departure_at: departure,
+    });
+    expect(withoutLocation).toEqual({ origin: "名古屋駅", destination: "下呂温泉", departure_at: departure });
+  });
+
+  it("passes a no-candidate response through as a normal result", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse(200, { pass_point: null, pass_at: null, pickup_candidates: [], total_duration_minutes: 30 }),
+      ),
+    );
+    const api = await loadClient({ VITE_DEMO_MODE: "false", VITE_API_BASE_URL: "http://api.test" });
+
+    const result = await api.analyzeRoute({ origin: "a", destination: "b", departure_at: departure });
+
+    expect(result.pass_point).toBeNull();
+    expect(result.pickup_candidates).toEqual([]);
+  });
+});
+
 describe("request() error objects", () => {
   it("marks FastAPI validation errors (array detail) as already-localized", async () => {
     vi.stubGlobal(

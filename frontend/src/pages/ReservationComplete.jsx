@@ -12,6 +12,7 @@ import {
 } from "../utils/reservationAccess";
 import { loadRouteContext } from "../utils/routeContext";
 import { toUserMessage } from "../utils/errorMessages";
+import { buildGoogleMapsUrl } from "../utils/googleMaps";
 
 // 初回読み込み(予約照会)の失敗も、Backendの英文detail("Reservation not
 // found"等)をそのまま出さない。GET /reservations/{id}は本番・DEMO_MODEとも、
@@ -65,16 +66,6 @@ function formatPickupHours(value) {
   if (typeof value !== "string") return null;
   const match = value.match(/^(\d{2}):(\d{2})/);
   return match ? `${match[1]}:${match[2]}` : null;
-}
-
-function buildGoogleMapsUrl({ destination, passPoint }) {
-  const params = new URLSearchParams({
-    api: "1",
-    destination,
-    waypoints: passPoint,
-    travelmode: "driving",
-  });
-  return `https://www.google.com/maps/dir/?${params.toString()}`;
 }
 
 // Reservation.jsxのPAYMENT_METHODSと合わせる。この画面より前に作られた
@@ -334,6 +325,8 @@ export default function ReservationComplete() {
           origin: location.state.origin,
           destination: location.state.destination,
           passPoint: location.state.passPoint,
+          passPointLat: location.state.passPointLat,
+          passPointLng: location.state.passPointLng,
         }
       : null;
 

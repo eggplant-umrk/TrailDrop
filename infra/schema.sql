@@ -370,6 +370,28 @@ from public, anon, authenticated;
 grant execute on function public.expire_stale_pending_reservations()
 to service_role;
 
+-- Pickup locations with coordinates for route-based pickup selection
+-- (PICKUP_SELECTION_MODE=route). items stays linked by name
+-- (items.location_name = pickup_locations.name). No seed rows: real
+-- coordinates must be confirmed on site before inserting them. RLS with no
+-- policies + no anon/authenticated privileges: service_role only.
+create table if not exists public.pickup_locations (
+    id uuid primary key default gen_random_uuid(),
+    name varchar not null
+        constraint pickup_locations_name_key unique,
+    latitude double precision not null
+        constraint pickup_locations_latitude_range check (latitude between -90 and 90),
+    longitude double precision not null
+        constraint pickup_locations_longitude_range check (longitude between -180 and 180),
+    is_active boolean not null default true,
+    created_at timestamptz default now()
+);
+
+alter table public.pickup_locations enable row level security;
+
+revoke all on table public.pickup_locations from anon, authenticated;
+grant select on table public.pickup_locations to service_role;
+
 insert into public.items (id, title, type, price, stock, location_name)
 values
     (

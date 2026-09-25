@@ -298,18 +298,32 @@ const DEMO_PASS_POINT = "道の駅 ロック・ガーデンひちそう";
 
 function demoAnalyzeRoute({ origin, destination, departure_at }) {
   const departureDate = new Date(departure_at);
-  const passAt = new Date(departureDate.getTime() + DEMO_FIRST_LEG_MINUTES * 60000);
+  const passAt = new Date(departureDate.getTime() + DEMO_FIRST_LEG_MINUTES * 60000).toISOString();
   return {
     origin,
     destination,
     pass_point: DEMO_PASS_POINT,
-    pass_at: passAt.toISOString(),
+    pass_at: passAt,
+    // DEMOでは実在地点の座標を持たない(未確認の座標を使わない)ため、座標は
+    // null。Google Mapsの経由地は地点名で開く。
+    pass_point_lat: null,
+    pass_point_lng: null,
+    pickup_candidates: [
+      {
+        name: DEMO_PASS_POINT,
+        lat: null,
+        lng: null,
+        pass_at: passAt,
+        distance_from_route_meters: 0,
+      },
+    ],
     total_duration_minutes: DEMO_TOTAL_DURATION_MINUTES,
     total_distance_meters: DEMO_TOTAL_DISTANCE_METERS,
   };
 }
 
-export async function analyzeRoute({ origin, destination, departure_at }) {
+// origin_location({lat, lng})は「現在地を使う」で取得した場合だけ送る。
+export async function analyzeRoute({ origin, destination, departure_at, origin_location = null }) {
   if (DEMO_MODE) {
     await new Promise((r) => setTimeout(r, 200));
     return demoAnalyzeRoute({ origin, destination, departure_at });
@@ -322,7 +336,12 @@ export async function analyzeRoute({ origin, destination, departure_at }) {
         "Content-Type": "application/json",
         "X-Client-Key": ROUTE_ANALYSIS_CLIENT_KEY,
       },
-      body: JSON.stringify({ origin, destination, departure_at }),
+      body: JSON.stringify({
+        origin,
+        destination,
+        departure_at,
+        ...(origin_location ? { origin_location } : {}),
+      }),
     },
     ROUTE_ANALYSIS_TIMEOUT_MS,
   );
