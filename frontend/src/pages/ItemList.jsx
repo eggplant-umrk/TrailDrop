@@ -92,8 +92,10 @@ export default function ItemList() {
                     未設定(主に体験)の商品では表示しない(一括修正U2)。 */}
                 {it.pickupAvailableFrom && it.pickupAvailableTo && (
                   <p className="mt-1 text-xs text-gray-600">
-                    受取可能時間 {formatPickupHours(it.pickupAvailableFrom)}
-                    〜{formatPickupHours(it.pickupAvailableTo)}
+                    営業時間{" "}
+                    <span className="whitespace-nowrap">
+                      {formatPickupHours(it.pickupAvailableFrom)}〜{formatPickupHours(it.pickupAvailableTo)}
+                    </span>
                   </p>
                 )}
               </div>

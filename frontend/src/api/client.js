@@ -90,6 +90,9 @@ async function request(path, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
   return json;
 }
 
+// DEMO_MODEの商品。受取可能時間(営業時間)は07:00〜21:00にそろえ、発表・
+// デモの時刻によって「今すぐ」の検索結果が0件にならないようにする
+// (判定ロジックは本番と同じまま、データだけの調整)。
 function demoGetItems() {
   return [
     {
@@ -99,8 +102,38 @@ function demoGetItems() {
       price: 500,
       stock: 20,
       location_name: "道の駅 ロック・ガーデンひちそう",
-      pickup_available_from: "09:00:00",
-      pickup_available_to: "18:00:00",
+      pickup_available_from: "07:00:00",
+      pickup_available_to: "21:00:00",
+    },
+    {
+      id: "gibier-curry-001",
+      title: "ジビエ鹿肉レトルトカレー",
+      type: "product",
+      price: 980,
+      stock: 2,
+      location_name: "道の駅 ロック・ガーデンひちそう",
+      pickup_available_from: "07:00:00",
+      pickup_available_to: "21:00:00",
+    },
+    {
+      id: "hoba-miso-001",
+      title: "朴葉みそ",
+      type: "product",
+      price: 650,
+      stock: 8,
+      location_name: "道の駅 ロック・ガーデンひちそう",
+      pickup_available_from: "07:00:00",
+      pickup_available_to: "21:00:00",
+    },
+    {
+      id: "hinoki-coaster-001",
+      title: "ヒノキ間伐材のコースター",
+      type: "product",
+      price: 1200,
+      stock: 5,
+      location_name: "道の駅 ロック・ガーデンひちそう",
+      pickup_available_from: "07:00:00",
+      pickup_available_to: "21:00:00",
     },
     {
       id: "log-experience-001",

@@ -442,7 +442,7 @@ export default function Reservation() {
   const pickupWindowLabel =
     pickupWindowStart && pickupWindowEnd
       ? formatPickupWindow(pickupWindowStart, pickupWindowEnd)
-      : `時間指定なし${itemHoursLabel ? `（受取可能時間 ${itemHoursLabel}）` : ""}`;
+      : `時間指定なし${itemHoursLabel ? `（営業時間 ${itemHoursLabel}）` : ""}`;
 
   const summaryRows = [
     { label: "受取地点", value: pickupPlace },
