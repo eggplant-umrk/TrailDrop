@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { useLocation, useParams, useNavigate } from "react-router-dom";
+import { Link, useLocation, useParams, useNavigate } from "react-router-dom";
 import { QRCodeCanvas } from "qrcode.react";
 import api from "../api/client";
 import {
@@ -399,7 +399,7 @@ export default function ReservationComplete() {
     ...(itemPickupHours
       ? [
           {
-            label: "商品受取可能時間",
+            label: "営業時間",
             value: `${formatPickupHours(itemPickupHours.from)}〜${formatPickupHours(itemPickupHours.to)}`,
           },
         ]
@@ -599,6 +599,15 @@ export default function ReservationComplete() {
           {cancelError}（表示中の予約情報は変更していません）
         </p>
       )}
+
+      <p className="mt-6 text-center">
+        <Link
+          to="/"
+          className="inline-flex min-h-[44px] items-center text-sm text-[#2f6f3e] underline"
+        >
+          トップへ戻る
+        </Link>
+      </p>
     </AppLayout>
   );
 }

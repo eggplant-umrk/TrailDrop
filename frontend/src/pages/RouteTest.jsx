@@ -7,6 +7,7 @@ import {
   primaryButtonClass,
   secondaryButtonClass,
 } from "../components/ui";
+import ItemThumbnail from "../components/ItemThumbnail";
 import { toUserMessage } from "../utils/errorMessages";
 import { getCurrentLocation } from "../utils/geolocation";
 import {
@@ -115,6 +116,8 @@ const WINDOW_OFFSET_RANGE = {
   stepMinutes: WINDOW_OFFSET_STEP_MINUTES,
   maxMinutes: WINDOW_OFFSET_MAX_MINUTES,
 };
+
+const HOW_TO_STEPS = ["行き先を入力", "途中の道の駅で商品を予約", "QRを見せて受け取る"];
 
 const inputClass =
   "mt-1 block min-h-[44px] w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-base";
@@ -520,6 +523,25 @@ export default function RouteTest() {
         </button>
       </form>
 
+      {/* 検索前だけ表示する、サービスの流れの静的な説明。 */}
+      {!result && (
+        <section className="mt-4 rounded-xl bg-white p-4 shadow-sm" aria-labelledby="how-to-title">
+          <h2 id="how-to-title" className="text-sm font-semibold">
+            TrailDropの使い方
+          </h2>
+          <ol className="mt-3 space-y-2">
+            {HOW_TO_STEPS.map((step, index) => (
+              <li key={step} className="flex items-center gap-3">
+                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#2f6f3e] text-sm font-bold text-white">
+                  {index + 1}
+                </span>
+                <span className="text-sm font-medium">{step}</span>
+              </li>
+            ))}
+          </ol>
+        </section>
+      )}
+
       {result && (
         <section ref={resultsRef} className="mt-6 scroll-mt-16 space-y-4" aria-live="polite">
           {pickupCandidates.length === 0 ? (
@@ -640,25 +662,29 @@ export default function RouteTest() {
                   <ul className="mt-3 space-y-3">
                     {timeFilteredItems.map((item) => (
                       <li key={item.id} className="rounded-lg border border-gray-200 p-3">
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
+                        <div className="flex items-start gap-3">
+                          <ItemThumbnail itemId={item.id} title={item.title} />
+                          <div className="min-w-0 flex-1">
                             <p className="font-semibold">
                               {item.title}
                               {item.type === "experience" && (
                                 <span className="ml-2 text-xs font-normal text-gray-500">体験</span>
                               )}
                             </p>
-                            <p className="mt-1 text-xs text-gray-600">
-                              受取可能時間 {formatPickupHours(item.pickup_available_from)}〜
-                              {formatPickupHours(item.pickup_available_to)}
+                            <p className="mt-0.5 flex items-baseline gap-2">
+                              <span className="text-lg font-bold">{formatYen(item.price)}</span>
+                              <span
+                                className={`text-xs ${item.stock > 0 ? "text-gray-600" : "font-medium text-red-600"}`}
+                              >
+                                {item.stock > 0 ? `残り${item.stock}` : "在庫切れ"}
+                              </span>
                             </p>
-                          </div>
-                          <div className="shrink-0 text-right">
-                            <p className="text-lg font-bold">{formatYen(item.price)}</p>
-                            <p
-                              className={`text-xs ${item.stock > 0 ? "text-gray-600" : "font-medium text-red-600"}`}
-                            >
-                              {item.stock > 0 ? `残り${item.stock}` : "在庫切れ"}
+                            <p className="text-xs text-gray-600">
+                              営業時間{" "}
+                              <span className="whitespace-nowrap">
+                                {formatPickupHours(item.pickup_available_from)}〜
+                                {formatPickupHours(item.pickup_available_to)}
+                              </span>
                             </p>
                           </div>
                         </div>
@@ -702,16 +728,27 @@ export default function RouteTest() {
                           key={item.id}
                           className="rounded-lg border border-dashed border-gray-300 bg-gray-50 p-3"
                         >
-                          <div className="flex items-start justify-between gap-3">
-                            <div className="min-w-0">
+                          <div className="flex items-start gap-3">
+                            <ItemThumbnail itemId={item.id} title={item.title} />
+                            <div className="min-w-0 flex-1">
                               <p className="font-semibold text-gray-700">{item.title}</p>
-                              <p className="mt-1 text-xs text-gray-600">
-                                受取可能時間 {formatPickupHours(item.pickup_available_from)}〜
-                                {formatPickupHours(item.pickup_available_to)}
+                              <p className="mt-0.5 flex items-baseline gap-2">
+                                <span className="text-lg font-bold text-gray-700">
+                                  {formatYen(item.price)}
+                                </span>
+                                <span
+                                  className={`text-xs ${item.stock > 0 ? "text-gray-600" : "font-medium text-red-600"}`}
+                                >
+                                  {item.stock > 0 ? `残り${item.stock}` : "在庫切れ"}
+                                </span>
                               </p>
-                            </div>
-                            <div className="shrink-0 text-right">
-                              <p className="font-bold text-gray-700">{formatYen(item.price)}</p>
+                              <p className="text-xs text-gray-600">
+                                営業時間{" "}
+                                <span className="whitespace-nowrap">
+                                  {formatPickupHours(item.pickup_available_from)}〜
+                                  {formatPickupHours(item.pickup_available_to)}
+                                </span>
+                              </p>
                               <span className="mt-1 inline-block rounded bg-gray-200 px-2 py-0.5 text-[11px] text-gray-600">
                                 この時間は受取不可
                               </span>
