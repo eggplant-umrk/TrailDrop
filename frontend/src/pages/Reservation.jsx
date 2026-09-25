@@ -448,7 +448,7 @@ export default function Reservation() {
     { label: "受取地点", value: pickupPlace },
     // 体験は受取時間帯ではなく希望日時で予約する。
     ...(item.requiresDate ? [] : [{ label: "受取時間帯", value: pickupWindowLabel }]),
-    { label: "金額", value: formatYen(item.price) },
+    { label: "金額", value: formatYen(item.price), emphasis: true },
   ];
 
   const formErrorNode = formError && (
@@ -456,6 +456,16 @@ export default function Reservation() {
       {formError}
     </p>
   );
+
+  // 「‹ 商品に戻る」: 履歴があればブラウザの戻ると同じ動き(検索結果の状態を
+  // 保ったまま戻る)。直接開いた場合など履歴が無ければ、来た経路の一覧へ。
+  function handleBackToItems() {
+    if ((window.history.state?.idx ?? 0) > 0) {
+      navigate(-1);
+    } else {
+      navigate(routePassPoint ? "/" : "/items");
+    }
+  }
 
   if (!isConfirmStep) {
     return (
@@ -470,7 +480,14 @@ export default function Reservation() {
           </>
         }
       >
-        <h1 className="pt-2 text-xl font-bold">予約内容の入力</h1>
+        <button
+          type="button"
+          onClick={handleBackToItems}
+          className="-ml-1 inline-flex min-h-[44px] items-center px-1 text-sm font-medium text-[#2f6f3e]"
+        >
+          ‹ 商品に戻る
+        </button>
+        <h1 className="text-xl font-bold">予約内容の入力</h1>
 
         <section className="mt-3 rounded-xl bg-white p-4 shadow-sm">
           <p className="text-lg font-semibold">{item.name}</p>
@@ -478,7 +495,9 @@ export default function Reservation() {
             {summaryRows.map((row) => (
               <div key={row.label} className="flex justify-between gap-3">
                 <dt className="shrink-0 text-gray-500">{row.label}</dt>
-                <dd className="text-right font-medium">{row.value}</dd>
+                <dd className={`text-right ${row.emphasis ? "text-lg font-bold" : "font-medium"}`}>
+                  {row.value}
+                </dd>
               </div>
             ))}
           </dl>
@@ -537,6 +556,7 @@ export default function Reservation() {
                     value={method.value}
                     checked={paymentMethod === method.value}
                     onChange={(e) => setPaymentMethod(e.target.value)}
+                    className="h-4 w-4 shrink-0 accent-[#2f6f3e]"
                   />
                   <span>{method.label}</span>
                 </label>
@@ -584,7 +604,9 @@ export default function Reservation() {
           ].map((row) => (
             <div key={row.label} className="flex justify-between gap-3 py-2">
               <dt className="shrink-0 text-gray-500">{row.label}</dt>
-              <dd className="text-right font-medium">{row.value}</dd>
+              <dd className={`text-right ${row.emphasis ? "text-lg font-bold" : "font-medium"}`}>
+                {row.value}
+              </dd>
             </div>
           ))}
         </dl>

@@ -15,6 +15,23 @@ export function formatYen(value) {
   return Number.isFinite(number) ? `¥${number.toLocaleString("ja-JP")}` : `¥${value}`;
 }
 
+// 在庫表示。残りが少ない(LOW_STOCK_THRESHOLD以下)ときは通常在庫と区別する。
+const LOW_STOCK_THRESHOLD = 3;
+
+export function StockLabel({ stock }) {
+  if (!(stock > 0)) {
+    return <span className="text-xs font-medium text-red-600">在庫切れ</span>;
+  }
+  if (stock <= LOW_STOCK_THRESHOLD) {
+    return (
+      <span className="whitespace-nowrap rounded bg-amber-100 px-1.5 py-0.5 text-xs font-semibold text-amber-800">
+        残りわずか {stock}
+      </span>
+    );
+  }
+  return <span className="whitespace-nowrap text-xs text-gray-600">残り{stock}</span>;
+}
+
 export function PrimaryButton({ className = "", ...props }) {
   return <button className={`${primaryButtonClass} ${className}`} {...props} />;
 }

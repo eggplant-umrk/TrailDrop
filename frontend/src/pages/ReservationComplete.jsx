@@ -548,8 +548,18 @@ export default function ReservationComplete() {
         </p>
       )}
 
+      <p className="mt-4 text-center">
+        <Link
+          to="/"
+          className="inline-flex min-h-[44px] items-center text-sm text-[#2f6f3e] underline"
+        >
+          トップへ戻る
+        </Link>
+      </p>
+
       {/* キャンセルはpending(受取前)の予約にのみ表示する。completed/
-          cancelledの予約はキャンセル不可(Backend側でも拒否される)。 */}
+          cancelledの予約はキャンセル不可(Backend側でも拒否される)。
+          取り消し操作のため、画面の最下部に他の操作と離して置く。 */}
       {isPending &&
         (!cancelConfirming ? (
           <button
@@ -559,12 +569,12 @@ export default function ReservationComplete() {
               setCancelError(null);
             }}
             disabled={refreshing}
-            className="mt-2 flex min-h-[44px] w-full items-center justify-center rounded-lg text-sm text-red-700 underline disabled:opacity-50"
+            className="mt-6 flex min-h-[44px] w-full items-center justify-center border-t border-gray-200 pt-2 text-sm text-red-700 underline disabled:opacity-50"
           >
             予約をキャンセルする
           </button>
         ) : (
-          <div className="mt-2 rounded-lg border border-red-200 bg-white p-3">
+          <div className="mt-6 rounded-lg border border-red-200 bg-white p-3">
             <p className="text-sm text-red-700">本当にキャンセルしますか？</p>
             <div className="mt-2 flex gap-2">
               {/* 2等分だとスマホ幅で「はい、キャンセルす/る」と改行されるため、
@@ -600,14 +610,6 @@ export default function ReservationComplete() {
         </p>
       )}
 
-      <p className="mt-6 text-center">
-        <Link
-          to="/"
-          className="inline-flex min-h-[44px] items-center text-sm text-[#2f6f3e] underline"
-        >
-          トップへ戻る
-        </Link>
-      </p>
     </AppLayout>
   );
 }
