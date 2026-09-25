@@ -4,6 +4,29 @@ import api from "../api/client";
 import { saveAccessToken } from "../utils/reservationAccess";
 import { saveRouteContext } from "../utils/routeContext";
 import { isPickupWindowEnded, msUntilPickupWindowEnds } from "../utils/pickupWindow";
+import { toUserMessage } from "../utils/errorMessages";
+
+const ITEM_LOAD_ERROR_MESSAGE = "商品情報を取得できませんでした。時間をおいて、もう一度お試しください。";
+
+// 予約作成が「確実に失敗した」(DEFINITELY_NOT_CREATED_STATUSES)場合に表示する
+// 文言。Backend(main.pyのreservation_error等)・DEMO_MODEが返すdetailの英文を
+// 画面に出さず、理由が伝わる日本語にする。
+const CREATE_ERROR_BY_DETAIL = {
+  "Item is out of stock": "申し訳ありません。この商品は在庫切れになりました。",
+  "Item not found": "この商品は見つかりませんでした。一覧から選び直してください。",
+  "Experience date is required": "希望日時を入力してください。",
+  "Requested date must be in the future": "希望日時は現在より後の日時を指定してください。",
+  "Invalid payment method": "支払い方法を選び直してください。",
+  "Pickup window is invalid":
+    "受取時間帯が正しくありません。お手数ですが、もう一度ルート分析からやり直してください。",
+};
+const CREATE_ERROR_BY_STATUS = {
+  400: "入力内容が正しくありません。",
+  404: "この商品は見つかりませんでした。一覧から選び直してください。",
+  409: "申し訳ありません。この商品は在庫切れになりました。",
+  422: "入力内容が正しくありません。",
+};
+const CREATE_ERROR_FALLBACK = "予約に失敗しました。";
 
 const PICKUP_WINDOW_ENDED_MESSAGE =
   "受取時間帯が終了しています。お手数ですが、もう一度ルート分析からやり直してください。";
@@ -189,7 +212,7 @@ export default function Reservation() {
           });
         }
       } catch (e) {
-        setError(e.message || "Failed to load item");
+        setError(toUserMessage(e, { fallback: ITEM_LOAD_ERROR_MESSAGE }));
       } finally {
         if (mounted) setLoading(false);
       }
@@ -360,7 +383,15 @@ export default function Reservation() {
       // 二重予約の恐れを警告表示し、安易な再試行を促さない)。
       const definitelyNotCreated = DEFINITELY_NOT_CREATED_STATUSES.has(e?.status);
       setAmbiguousFailure(!definitelyNotCreated);
-      setFormError(definitelyNotCreated ? e.message || "予約に失敗しました" : null);
+      setFormError(
+        definitelyNotCreated
+          ? toUserMessage(e, {
+              byDetail: CREATE_ERROR_BY_DETAIL,
+              byStatus: CREATE_ERROR_BY_STATUS,
+              fallback: CREATE_ERROR_FALLBACK,
+            })
+          : null,
+      );
     } finally {
       setSubmitting(false);
     }

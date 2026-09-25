@@ -1,6 +1,20 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import api from "../api/client";
+import { toUserMessage } from "../utils/errorMessages";
+
+// POST /routes/analyzeの失敗を日本語で案内する(Backend/route_analysis.pyの
+// detailは英語の内部向け文言のため、そのまま表示しない)。422のうち
+// バリデーションエラー(detailが配列)はclient.jsで既に日本語化済み。
+const ROUTE_ANALYSIS_ERROR_BY_STATUS = {
+  401: "ルート分析を利用できませんでした。時間をおいて、もう一度お試しください。",
+  422: "出発地・目的地・出発日時からルートを計算できませんでした。入力内容を確認してください。",
+  429: "ルート分析の利用が集中しています。1分ほど待ってから、もう一度お試しください。",
+  502: "ルート情報を取得できませんでした。時間をおいて、もう一度お試しください。",
+  503: "現在ルート分析を利用できません。時間をおいて、もう一度お試しください。",
+};
+const ROUTE_ANALYSIS_ERROR_FALLBACK = "ルート分析に失敗しました。";
+const ITEMS_LOAD_ERROR_FALLBACK = "商品情報の取得に失敗しました。";
 
 // RouteTestの入力・分析結果をlocalStorageに保存し、Reservationからの戻る
 // 操作・リロード・別タブでも再実行(Google Routes APIの再呼び出し)無しで
@@ -157,7 +171,7 @@ export default function RouteTest() {
         : [];
       setMatchedItems(matched);
     } catch (itemsRequestError) {
-      setItemsError(itemsRequestError.message || "商品情報の取得に失敗しました。");
+      setItemsError(toUserMessage(itemsRequestError, { fallback: ITEMS_LOAD_ERROR_FALLBACK }));
     } finally {
       setItemsLoading(false);
     }
@@ -181,7 +195,12 @@ export default function RouteTest() {
       setResult(data);
       await loadMatchingItems(data.pass_point);
     } catch (requestError) {
-      setError(requestError.message || "ルート分析に失敗しました。");
+      setError(
+        toUserMessage(requestError, {
+          byStatus: ROUTE_ANALYSIS_ERROR_BY_STATUS,
+          fallback: ROUTE_ANALYSIS_ERROR_FALLBACK,
+        }),
+      );
     } finally {
       setLoading(false);
     }

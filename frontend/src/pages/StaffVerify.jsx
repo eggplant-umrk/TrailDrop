@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import api from "../api/client";
+import { toUserMessage } from "../utils/errorMessages";
 
 // 同一セッション内でスタッフトークンの再入力を不要にする(一括修正m8)。
 // sessionStorageに留め、localStorageには保存しない(端末に無期限で
@@ -145,22 +146,23 @@ function resolveErrorMessage(requestError) {
   if (isCancelledConflict(requestError)) {
     return "この予約はキャンセル済みのため、受け渡しできません。";
   }
-  return STATUS_MESSAGES[requestError?.status] || requestError?.message || "QR検証に失敗しました。";
+  return (
+    STATUS_MESSAGES[requestError?.status] ||
+    toUserMessage(requestError, { fallback: "QR検証に失敗しました。" })
+  );
 }
 
 function resolveLookupErrorMessage(requestError) {
   return (
     LOOKUP_STATUS_MESSAGES[requestError?.status] ||
-    requestError?.message ||
-    "予約情報の取得に失敗しました。"
+    toUserMessage(requestError, { fallback: "予約情報の取得に失敗しました。" })
   );
 }
 
 function resolveSearchErrorMessage(requestError) {
   return (
     SEARCH_STATUS_MESSAGES[requestError?.status] ||
-    requestError?.message ||
-    "予約の検索に失敗しました。"
+    toUserMessage(requestError, { fallback: "予約の検索に失敗しました。" })
   );
 }
 
