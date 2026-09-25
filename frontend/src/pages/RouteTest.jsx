@@ -728,20 +728,27 @@ export default function RouteTest() {
                           key={item.id}
                           className="rounded-lg border border-dashed border-gray-300 bg-gray-50 p-3"
                         >
-                          <div className="flex items-start justify-between gap-3">
+                          <div className="flex items-start gap-3">
                             <ItemThumbnail itemId={item.id} title={item.title} />
                             <div className="min-w-0 flex-1">
                               <p className="font-semibold text-gray-700">{item.title}</p>
-                              <p className="mt-1 text-xs text-gray-600">
+                              <p className="mt-0.5 flex items-baseline gap-2">
+                                <span className="text-lg font-bold text-gray-700">
+                                  {formatYen(item.price)}
+                                </span>
+                                <span
+                                  className={`text-xs ${item.stock > 0 ? "text-gray-600" : "font-medium text-red-600"}`}
+                                >
+                                  {item.stock > 0 ? `残り${item.stock}` : "在庫切れ"}
+                                </span>
+                              </p>
+                              <p className="text-xs text-gray-600">
                                 営業時間{" "}
                                 <span className="whitespace-nowrap">
                                   {formatPickupHours(item.pickup_available_from)}〜
                                   {formatPickupHours(item.pickup_available_to)}
                                 </span>
                               </p>
-                            </div>
-                            <div className="shrink-0 text-right">
-                              <p className="font-bold text-gray-700">{formatYen(item.price)}</p>
                               <span className="mt-1 inline-block rounded bg-gray-200 px-2 py-0.5 text-[11px] text-gray-600">
                                 この時間は受取不可
                               </span>
