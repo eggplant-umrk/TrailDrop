@@ -1,7 +1,15 @@
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta, timezone
 from uuid import UUID
 
 from pydantic import BaseModel, field_validator, model_validator
+
+# Frontendの氏名入力(Reservation.jsx、必須のtextフィールド)と揃える最大長。
+USER_NAME_MAX_LENGTH = 100
+
+# RouteTest.jsxのpickup windowは常にちょうど120分幅(WINDOW_DURATION_MINUTES)
+# だが、offsetスライダー操作やクロックのずれを考慮し十分な余裕を持たせつつ、
+# 直接APIを叩いた場合の「不自然に長い時間帯」を弾けるだけの上限にする。
+PICKUP_WINDOW_MAX_DURATION = timedelta(hours=6)
 
 
 class Item(BaseModel):
@@ -33,6 +41,18 @@ class ReservationCreate(BaseModel):
     # 設定できる。RouteTestを経由しない予約では両方Noneのまま。
     pickup_window_start: datetime | None = None
     pickup_window_end: datetime | None = None
+
+    # Frontendは既にrequired属性で空文字を弾いているが、Backend側でも
+    # trim・空白のみ・長すぎる値を422で拒否する(直接APIを叩いた場合の防御)。
+    @field_validator("user_name")
+    @classmethod
+    def user_name_must_be_non_blank_and_sized(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("user_name must not be blank")
+        if len(trimmed) > USER_NAME_MAX_LENGTH:
+            raise ValueError(f"user_name must be at most {USER_NAME_MAX_LENGTH} characters")
+        return trimmed
 
     @field_validator("requested_at")
     @classmethod
@@ -70,8 +90,25 @@ class ReservationCreate(BaseModel):
             raise ValueError(
                 "pickup_window_start and pickup_window_end must both be set or both be omitted"
             )
-        if start is not None and end is not None and start >= end:
-            raise ValueError("pickup_window_start must be before pickup_window_end")
+        if start is not None and end is not None:
+            if start >= end:
+                raise ValueError("pickup_window_start must be before pickup_window_end")
+            # PMレビューBLOCKER B1: startが未来であることまでは要求しない。
+            # RouteTest.jsxのオフセットスライダー(±180分、変更しない仕様)は
+            # windowStart = pass_at + (offset - 60分)を計算するため、pass_at
+            # が近い将来(例: 30分後)でoffsetを大きくマイナス側に振ると、
+            # windowStartだけが既に過去になるのは正常な操作の結果であり、
+            # これを拒否すると既存のオフセット機能を壊してしまう。
+            # 「受取時間帯として完全に無効」と言えるのは、終了時刻(end)まで
+            # 過ぎてしまった場合(= start <= end <= now)のみ。
+            # start <= now < end(受取枠の途中に差し掛かっている)は許可する。
+            if end <= datetime.now(timezone.utc):
+                raise ValueError("pickup window has already ended")
+            # RouteTest.jsxの受取枠は常にちょうど120分幅(offsetで枠自体が伸び
+            # 縮みすることはない)。それを大きく超える幅は直接APIを叩いた場合
+            # などの不自然な値とみなし、余裕を持たせた上限で拒否する。
+            if end - start > PICKUP_WINDOW_MAX_DURATION:
+                raise ValueError("pickup window is too long")
         return self
 
 
@@ -125,6 +162,20 @@ class StaffReservationResponse(BaseModel):
 
 class QRVerifyRequest(BaseModel):
     qr_token: UUID
+
+
+# PMレビューm-3: 顧客氏名での検索はGETのクエリパラメータではなくPOST+JSON
+# bodyで送る(氏名がURL・アクセスログに残らないようにするため)。
+class StaffReservationSearchRequest(BaseModel):
+    user_name: str
+
+
+# POST /staff/reservations/expire-stale の応答。取消した予約のIDのみを返し
+# (StaffReservationResponseと同じくaccess_token/qr_tokenは含めない)、
+# 何件処理したかをexpired_countで明示する。
+class ExpiredReservationsResponse(BaseModel):
+    expired_count: int
+    expired_ids: list[UUID]
 
 
 ROUTE_LOCATION_MIN_LENGTH = 1

@@ -2,6 +2,32 @@ import React, { useEffect, useState } from "react";
 import { useParams, useNavigate, useLocation } from "react-router-dom";
 import api from "../api/client";
 import { saveAccessToken } from "../utils/reservationAccess";
+import { saveRouteContext } from "../utils/routeContext";
+import { isPickupWindowEnded, msUntilPickupWindowEnds } from "../utils/pickupWindow";
+
+const PICKUP_WINDOW_ENDED_MESSAGE =
+  "受取時間帯が終了しています。お手数ですが、もう一度ルート分析からやり直してください。";
+// setTimeoutの遅延上限(約24.8日)。これを超える先の終了時刻は、上限で一度
+// 起きてから再計算する。
+const MAX_TIMEOUT_MS = 2 ** 31 - 1;
+
+// datetime-local入力値("YYYY-MM-DDTHH:MM"、timezoneを持たないJST壁時計時刻
+// として扱う。handleConfirmPaymentの`${date}:00+09:00`と同じ解釈)を、
+// 生の値のまま表示せず日本語の日時表示に変換する(一括修正U5)。
+function formatRequestedDateTime(value) {
+  if (!value) return "";
+  const parsed = new Date(`${value}:00+09:00`);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).format(parsed);
+}
 
 function minimumJapanDateTime() {
   const oneMinuteFromNowInJapan = Date.now() + 9 * 60 * 60 * 1000 + 60 * 1000;
@@ -27,6 +53,14 @@ function formatPickupWindow(startValue, endValue) {
     hourCycle: "h23",
   });
   return `${dateFormatter.format(new Date(startValue))}〜${timeFormatter.format(new Date(endValue))}`;
+}
+
+// "HH:MM:SS" / "HH:MM" から表示用の"HH:MM"を取り出す(ItemList.jsx/
+// RouteTest.jsxと同じ抽出方法)。一括修正U2: 商品自体の営業時間を表示する。
+function formatPickupHours(value) {
+  if (typeof value !== "string") return null;
+  const match = value.match(/^(\d{2}):(\d{2})/);
+  return match ? `${match[1]}:${match[2]}` : null;
 }
 
 // main.pyのVALID_PAYMENT_METHODSと合わせる。実決済は行わないモック決済。
@@ -150,6 +184,8 @@ export default function Reservation() {
             location: found.location_name,
             requiresDate: found.type === "experience",
             stock: found.stock,
+            pickupAvailableFrom: found.pickup_available_from,
+            pickupAvailableTo: found.pickup_available_to,
           });
         }
       } catch (e) {
@@ -181,6 +217,39 @@ export default function Reservation() {
     setAmbiguousFailure(false);
   }, [isConfirmStep]);
 
+  // PMレビューm-a: 受取時間帯の終了判定をrender時のDate.now()だけに頼ると、
+  // 画面を開いたまま終了時刻を過ぎても再renderが起きず、ボタンが押せる
+  // ままになる。終了時刻ちょうどにタイマーで再判定し、端末スリープ等で
+  // タイマーが遅れた場合に備えて画面復帰時にも再判定する。送信時には
+  // さらに押下時点の現在時刻で判定し直す(handleConfirmPayment)。
+  const [pickupWindowEnded, setPickupWindowEnded] = useState(() =>
+    isPickupWindowEnded(pickupWindowEnd),
+  );
+  const [pickupWindowCheckTick, setPickupWindowCheckTick] = useState(0);
+
+  useEffect(() => {
+    setPickupWindowEnded(isPickupWindowEnded(pickupWindowEnd));
+    const remainingMs = msUntilPickupWindowEnds(pickupWindowEnd);
+    if (remainingMs === null) return undefined;
+    // +50msは、タイマーが境界ちょうどで発火してend <= nowをまだ満たさない
+    // ケースを避けるための余裕(満たさなければ再度タイマーを張るだけ)。
+    const timeoutId = setTimeout(
+      () => setPickupWindowCheckTick((tick) => tick + 1),
+      Math.min(remainingMs + 50, MAX_TIMEOUT_MS),
+    );
+    return () => clearTimeout(timeoutId);
+  }, [pickupWindowEnd, pickupWindowCheckTick]);
+
+  useEffect(() => {
+    function handleVisibilityChange() {
+      if (document.visibilityState === "visible") {
+        setPickupWindowCheckTick((tick) => tick + 1);
+      }
+    }
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+  }, []);
+
   if (loading) return <div className="p-4">読み込み中…</div>;
   if (error) return <div className="p-4 text-red-600">{error}</div>;
   if (!item) return <div className="p-4">指定された商品が見つかりません。</div>;
@@ -197,6 +266,11 @@ export default function Reservation() {
     }
     if (!paymentMethod) {
       setFormError("支払い方法を選択してください。");
+      return;
+    }
+    if (isPickupWindowEnded(pickupWindowEnd, Date.now())) {
+      setPickupWindowEnded(true);
+      setFormError(PICKUP_WINDOW_ENDED_MESSAGE);
       return;
     }
     setFormError(null);
@@ -219,6 +293,17 @@ export default function Reservation() {
     // 二重送信防止: submitting中はボタン自体をdisabledにする(下のJSX)ため、
     // ここでも念のため既に送信中なら何もしない。
     if (submitting) return;
+
+    // 古い/不正なRouteTest状態(戻る/進む操作、別タブの古い結果からの直接
+    // 遷移、確認画面を開いたままの時間経過など)から送信されるケースを防ぐ。
+    // render時の値ではなく、押下時点の現在時刻で必ず判定し直す(PMレビュー
+    // m-a)。Backend側でも同じ基準(end <= now)で422になるが、ここで先に
+    // 弾いて不要な通信・分かりにくい失敗表示を避ける。
+    if (isPickupWindowEnded(pickupWindowEnd, Date.now())) {
+      setPickupWindowEnded(true);
+      setFormError(PICKUP_WINDOW_ENDED_MESSAGE);
+      return;
+    }
 
     setSubmitting(true);
     setFormError(null);
@@ -250,15 +335,13 @@ export default function Reservation() {
         // route情報は補助データ(Google Mapsボタン表示用)であり、これの保存に
         // 失敗しても予約自体は成立させる。外側のtry/catchに巻き込むと、予約は
         // 成功しているのに完了画面へ遷移できなくなってしまうため個別に囲む。
-        try {
-          sessionStorage.setItem(
-            `traildrop_route_${res.id}`,
-            JSON.stringify({ origin: routeOrigin, destination: routeDestination, passPoint: routePassPoint }),
-          );
-        } catch (storageError) {
-          // 保存できなくても無視する。完了画面でGoogle Mapsボタンが
-          // 表示されない可能性があるだけで、予約完了自体は継続する。
-        }
+        // localStorage保存(saveRouteContext内)により、別タブで完了画面を
+        // 開いた場合でもGoogle Mapsボタンを表示できる(一括修正U6)。
+        saveRouteContext(res.id, {
+          origin: routeOrigin,
+          destination: routeDestination,
+          passPoint: routePassPoint,
+        });
       }
 
       navigate(`/complete/${res.id}`, {
@@ -284,12 +367,25 @@ export default function Reservation() {
   }
 
   const selectedPaymentLabel = PAYMENT_METHODS.find((m) => m.value === paymentMethod)?.label || "";
+  // PMレビューBLOCKER B1: RouteTest.jsx側でも「受取時間帯終了」なら予約導線を
+  // 塞いでいるが、ブラウザの戻る/進む操作や、別タブで古いRouteTest結果から
+  // 直接この画面のURLを開いた場合など、古いlocation.stateのままここへ
+  // 到達するケースがあり得る。Backend(models.py)の判定基準(end <= now なら
+  // 無効)と揃え、確認画面での送信自体も多重に防ぐ。値は上のタイマーで
+  // 現在時刻に追従する(PMレビューm-a)。
+  const isPickupWindowExpired = pickupWindowEnded;
 
   return (
     <div className="min-h-screen p-4 bg-[#f7fbf6] text-[#16381b]">
       <header className="mb-4">
         <h2 className="text-xl font-semibold">{item.name}</h2>
         <div className="text-sm">場所: {item.location}</div>
+        {item.pickupAvailableFrom && item.pickupAvailableTo && (
+          <div className="text-sm text-gray-600">
+            商品受取可能時間: {formatPickupHours(item.pickupAvailableFrom)}
+            〜{formatPickupHours(item.pickupAvailableTo)}
+          </div>
+        )}
         {/* RouteTestで受取時間帯を選択してきた場合のみ表示する(入力画面・
             確認画面の両方で確認できるようheaderに置く)。選択していない場合
             (ItemListから直接来た等)はこのブロック自体を出さない。 */}
@@ -311,8 +407,15 @@ export default function Reservation() {
           )}
 
           <label className="block">
-            <div className="text-sm">氏名（必須）</div>
-            <input type="text" value={name} onChange={(e) => setName(e.target.value)} required className="mt-1 p-2 border rounded w-full" />
+            <div className="text-sm">氏名（必須・100文字まで）</div>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              required
+              maxLength={100}
+              className="mt-1 p-2 border rounded w-full"
+            />
           </label>
 
           <fieldset className="block">
@@ -364,7 +467,7 @@ export default function Reservation() {
               {item.requiresDate && (
                 <div className="flex justify-between">
                   <dt>希望日時</dt>
-                  <dd>{date}</dd>
+                  <dd>{formatRequestedDateTime(date)}</dd>
                 </div>
               )}
               <div className="flex justify-between">
@@ -391,6 +494,12 @@ export default function Reservation() {
                 <li>現時点では、この画面から予約状況をご自身で確認する機能はありません。</li>
                 <li>ご不安な場合は、受取窓口（{item.location}）で予約状況をご確認ください。</li>
               </ul>
+            </div>
+          )}
+          {/* 押下時の再判定でformErrorに同じ文言を出した場合は二重に表示しない。 */}
+          {isPickupWindowExpired && formError !== PICKUP_WINDOW_ENDED_MESSAGE && (
+            <div className="rounded border border-red-300 bg-red-50 p-3 text-sm text-red-700" role="alert">
+              {PICKUP_WINDOW_ENDED_MESSAGE}
             </div>
           )}
           {formError && <div className="text-red-600">{formError}</div>}
@@ -421,9 +530,9 @@ export default function Reservation() {
             <button
               type="button"
               onClick={handleConfirmPayment}
-              disabled={submitting}
+              disabled={submitting || isPickupWindowExpired}
               aria-busy={submitting}
-              className={`flex-1 px-4 py-2 text-white rounded ${submitting ? 'bg-gray-400' : 'bg-[#2f6f3e]'}`}
+              className={`flex-1 px-4 py-2 text-white rounded disabled:opacity-50 ${submitting ? 'bg-gray-400' : 'bg-[#2f6f3e]'}`}
             >
               {submitting ? '予約中…' : '支払いを確定する'}
             </button>

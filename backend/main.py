@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from supabase import Client, create_client
 
 from models import (
+    ExpiredReservationsResponse,
     Item,
     QRVerifyRequest,
     QRVerifyResponse,
@@ -19,6 +20,7 @@ from models import (
     RouteAnalysisRequest,
     RouteAnalysisResponse,
     StaffReservationResponse,
+    StaffReservationSearchRequest,
 )
 from route_analysis import RouteAnalysisError, analyze_route
 
@@ -41,7 +43,20 @@ app.add_middleware(
 )
 
 
+# create_client()はHTTPコネクションプールを内部に持つため、リクエストの
+# たびに新規生成すると無駄にコネクションを張り直すことになる。supabase-py
+# のClientはリクエストごとに独立したHTTP呼び出しを行うだけで、複数
+# リクエストにまたがる可変状態を持たないため、プロセス内でsingletonとして
+# 安全に使い回せる。テストはmain.get_supabase自体をmonkeypatchで丸ごと
+# 差し替えるため、このキャッシュの影響を受けない。
+_supabase_client: Client | None = None
+_supabase_client_lock = threading.Lock()
+
+
 def get_supabase() -> Client:
+    global _supabase_client
+    if _supabase_client is not None:
+        return _supabase_client
     url = os.getenv("SUPABASE_URL")
     key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
     if not url or not key:
@@ -49,14 +64,82 @@ def get_supabase() -> Client:
             status_code=503,
             detail="SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be configured",
         )
-    return create_client(url, key)
+    with _supabase_client_lock:
+        if _supabase_client is None:
+            _supabase_client = create_client(url, key)
+    return _supabase_client
 
 
-def require_staff_token(token: str | None) -> None:
+# staff系エンドポイント(受取確認・予約照会・予約者名検索・期限切れ一括処理)
+# 全てに共通のbrute-force対策。IP単位で「認証失敗(不正/欠落したX-Staff-
+# Token)」の回数だけを数え、STAFF_API_TOKENの総当たりを遅くする(完全に
+# 防ぐものではないが、レート制限が全く無い状態からの改善)。
+# PMレビューm-b: 正しいトークンでの通常操作(連続したQR受取確認など)は
+# カウントしない。店舗の同一NAT配下にいる複数のスタッフ端末が、正常な
+# 操作だけで429になることを避けるため。ただし直近の失敗が上限に達した
+# IPは、トークンの正誤に関わらずwindowが明けるまで429にする(正しいトー
+# クンだけ通すと、総当たり中に正解を引いた瞬間に通ってしまい制限の意味が
+# 無くなるため)。トークン自体はレスポンス・ログのどちらにも出力しない
+# (既存どおり)。
+STAFF_AUTH_RATE_LIMIT = 20
+STAFF_AUTH_RATE_WINDOW_SECONDS = 60.0
+STAFF_AUTH_RATE_LIMIT_CLEANUP_INTERVAL_SECONDS = STAFF_AUTH_RATE_WINDOW_SECONDS
+_staff_auth_rate_lock = threading.Lock()
+_staff_auth_failure_log: dict[str, list[float]] = {}
+_staff_auth_rate_limit_last_cleanup = 0.0
+
+
+def _cleanup_staff_auth_rate_limit_locked(now: float) -> None:
+    global _staff_auth_rate_limit_last_cleanup
+    if now - _staff_auth_rate_limit_last_cleanup < STAFF_AUTH_RATE_LIMIT_CLEANUP_INTERVAL_SECONDS:
+        return
+    window_start = now - STAFF_AUTH_RATE_WINDOW_SECONDS
+    stale_ips = [
+        ip
+        for ip, timestamps in _staff_auth_failure_log.items()
+        if not any(t > window_start for t in timestamps)
+    ]
+    for ip in stale_ips:
+        del _staff_auth_failure_log[ip]
+    _staff_auth_rate_limit_last_cleanup = now
+
+
+def check_staff_auth_rate_limit(client_ip: str) -> None:
+    """直近の認証失敗が上限に達していれば429。ここでは何も記録しない。"""
+    now = time.monotonic()
+    window_start = now - STAFF_AUTH_RATE_WINDOW_SECONDS
+    with _staff_auth_rate_lock:
+        _cleanup_staff_auth_rate_limit_locked(now)
+        recent = [t for t in _staff_auth_failure_log.get(client_ip, []) if t > window_start]
+        if recent:
+            _staff_auth_failure_log[client_ip] = recent
+        else:
+            _staff_auth_failure_log.pop(client_ip, None)
+        if len(recent) >= STAFF_AUTH_RATE_LIMIT:
+            raise HTTPException(
+                status_code=429,
+                detail="Too many staff authentication attempts. Please try again later.",
+            )
+
+
+def record_staff_auth_failure(client_ip: str) -> None:
+    now = time.monotonic()
+    window_start = now - STAFF_AUTH_RATE_WINDOW_SECONDS
+    with _staff_auth_rate_lock:
+        recent = [t for t in _staff_auth_failure_log.get(client_ip, []) if t > window_start]
+        recent.append(now)
+        _staff_auth_failure_log[client_ip] = recent
+
+
+def require_staff_token(token: str | None, client_ip: str) -> None:
+    check_staff_auth_rate_limit(client_ip)
     expected_token = os.getenv("STAFF_API_TOKEN")
     if not expected_token:
+        # サーバー側の設定不備であり、クライアントの認証失敗ではないため
+        # 失敗回数には数えない。
         raise HTTPException(status_code=503, detail="Staff authentication is not configured")
     if not token or not secrets.compare_digest(token, expected_token):
+        record_staff_auth_failure(client_ip)
         raise HTTPException(status_code=401, detail="Invalid staff token")
 
 
@@ -65,6 +148,42 @@ def require_staff_token(token: str | None) -> None:
 # ブラウザに埋め込まれる前提の値であり秘匿は期待できないが、/docsからエンドポイント
 # を見つけて叩くだけの無差別botや直接curlを弾き、下のレート制限と組み合わせて
 # Google Routes APIのquota消費・想定外課金のリスクを下げる。
+def get_trusted_proxy_ips() -> set[str]:
+    configured = os.getenv("TRUSTED_PROXY_IPS", "")
+    return {ip.strip() for ip in configured.split(",") if ip.strip()}
+
+
+# reverse proxy配下では request.client.host が全リクエストで同一(proxyの
+# アドレス)になり、IP単位のレート制限が実質無効化されてしまう。
+# TRUSTED_PROXY_IPS に明示的に列挙されたIPからの接続に限り、
+# X-Forwarded-For を信頼して実クライアントIPを取り出す。
+#
+# PMレビューm-4: このロジックは「TCP接続元からアプリまでの間に、信頼できる
+# reverse proxyがちょうど1台だけ挟まる」構成を前提にしている(詳細は
+# .env.example の TRUSTED_PROXY_IPS の説明を参照)。この前提の下では、
+# X-Forwarded-Forのうち安全に信頼できるのは「その1台のproxyが自分の直接の
+# 接続元として書き足した値」だけであり、それはヘッダの最右端になる
+# (多くのproxyはクライアントから届いたX-Forwarded-Forを上書きせず、自分が
+# 見た接続元IPを既存の値の末尾に追記する設定がデフォルトのため)。最左端を
+# 採用すると、悪意あるクライアントが最初から
+# `X-Forwarded-For: 1.2.3.4, ...` を付けてリクエストを送った場合に、
+# proxyが末尾に追記した本当の接続元IPではなく偽装された1.2.3.4を信頼して
+# しまう(なりすまし)。そのため最右端を採用する。
+# 未設定時やTCP接続元がリストに無い場合は request.client.host を使う
+# (今までと同じ安全な挙動)。任意のクライアントがX-Forwarded-Forを
+# 偽装しても、信頼されたproxyを経由しない限りこの値は使われない。
+def resolve_client_ip(http_request: Request) -> str:
+    direct_ip = http_request.client.host if http_request.client else None
+    trusted_proxies = get_trusted_proxy_ips()
+    if direct_ip and trusted_proxies and direct_ip in trusted_proxies:
+        forwarded_for = http_request.headers.get("X-Forwarded-For")
+        if forwarded_for:
+            last_hop = forwarded_for.split(",")[-1].strip()
+            if last_hop:
+                return last_hop
+    return direct_ip or "unknown"
+
+
 def require_route_analysis_client_key(client_key: str | None) -> None:
     expected_key = os.getenv("ROUTE_ANALYSIS_CLIENT_KEY")
     if not expected_key:
@@ -308,6 +427,11 @@ def get_reservation(
 ):
     if not x_reservation_token:
         raise HTTPException(status_code=404, detail="Reservation not found")
+    # cancel_reservation/get_staff_reservationと同じ方式でUUID形式を検証する。
+    # 検証せずにDBへ渡すと、Postgresの22P02(invalid input syntax for type
+    # uuid)が生の例外として漏れ、下のexcept Exceptionで502になってしまう。
+    require_valid_uuid(reservation_id)
+    require_valid_uuid(x_reservation_token)
     try:
         response = (
             get_supabase()
@@ -365,9 +489,10 @@ def cancel_reservation(
 @app.post("/qr/verify", response_model=QRVerifyResponse)
 def verify_qr(
     request: QRVerifyRequest,
+    http_request: Request,
     x_staff_token: str | None = Header(default=None, alias="X-Staff-Token"),
 ):
-    require_staff_token(x_staff_token)
+    require_staff_token(x_staff_token, resolve_client_ip(http_request))
     try:
         supabase = get_supabase()
 
@@ -429,11 +554,12 @@ def verify_qr(
 @app.get("/staff/reservations/{reservation_id}", response_model=StaffReservationResponse)
 def get_staff_reservation(
     reservation_id: str,
+    http_request: Request,
     x_staff_token: str | None = Header(default=None, alias="X-Staff-Token"),
 ):
     # X-Reservation-Tokenは使わない(顧客用の予約照会とは別の認可軸)。
     # スタッフはX-Staff-Tokenのみで、どの予約でも参照できる。
-    require_staff_token(x_staff_token)
+    require_staff_token(x_staff_token, resolve_client_ip(http_request))
     require_valid_uuid(reservation_id)
     try:
         supabase = get_supabase()
@@ -476,6 +602,116 @@ def get_staff_reservation(
         raise HTTPException(status_code=502, detail="Failed to fetch reservation") from exc
 
 
+# 曖昧な失敗(POST /reservationsが502等で終わった場合)で予約IDが分からない
+# 顧客に対し、現地スタッフが安全に予約を探せるようにする読み取り専用検索。
+# 予約者名の部分一致のみを検索キーにする(他の利用者の予約を不用意に一覧化
+# しないよう、空文字・1文字だけの検索は拒否し、件数もSTAFF_SEARCH_MAX_
+# RESULTSで打ち切る)。X-Staff-Tokenは必須。パス名を/staff/reservations-
+# searchにしているのは、/staff/reservations/{reservation_id}という既存の
+# パスパラメータ付きルートと衝突しないようにするため。
+# PMレビューm-3: 顧客の氏名がURL・アクセスログに残らないよう、GETの
+# クエリパラメータではなくPOST + JSON bodyにする。
+STAFF_SEARCH_MIN_QUERY_LENGTH = 2
+STAFF_SEARCH_MAX_RESULTS = 20
+
+
+# PMレビューm-3: ilikeのパターン中でユーザー入力がそのままワイルドカード
+# として解釈されないようにエスケープする。対象は、SQLのLIKE/ILIKEが特別
+# 扱いする"%"・"_"、PostgRESTがilikeのURL値中で"%"の代わりとして解釈する
+# "*"、そしてエスケープ文字そのものである"\"(先にエスケープしないと、後段
+# で挿入する"\"と衝突して意図しない解釈になる)。デフォルトのSQL ESCAPE文字
+# は"\"のため、追加のESCAPE句指定は不要。
+def escape_ilike_wildcards(value: str) -> str:
+    return (
+        value.replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+        .replace("*", "\\*")
+    )
+
+
+@app.post("/staff/reservations-search", response_model=list[StaffReservationResponse])
+def search_staff_reservations(
+    http_request: Request,
+    payload: StaffReservationSearchRequest,
+    x_staff_token: str | None = Header(default=None, alias="X-Staff-Token"),
+):
+    require_staff_token(x_staff_token, resolve_client_ip(http_request))
+    trimmed_query = payload.user_name.strip()
+    if len(trimmed_query) < STAFF_SEARCH_MIN_QUERY_LENGTH:
+        raise HTTPException(
+            status_code=422,
+            detail=f"user_name must be at least {STAFF_SEARCH_MIN_QUERY_LENGTH} characters",
+        )
+    try:
+        supabase = get_supabase()
+        response = (
+            supabase
+            .table("reservations")
+            .select("*")
+            # ilikeは大文字小文字を区別しない部分一致。前後の%はこの検索自体の
+            # 「部分一致」を表す意図的なワイルドカードで、trimmed_query内の
+            # 文字は全てescape_ilike_wildcardsでエスケープ済み。
+            .ilike("user_name", f"%{escape_ilike_wildcards(trimmed_query)}%")
+            .order("reserved_at", desc=True)
+            .limit(STAFF_SEARCH_MAX_RESULTS)
+            .execute()
+        )
+        reservations = response.data or []
+
+        # item_titleの解決はget_staff_reservationと同じ「失敗しても予約情報
+        # 自体は返す」方針。N+1を避けるため、対象item_idをまとめて1回で取得
+        # する。
+        item_ids = {r["item_id"] for r in reservations if r.get("item_id")}
+        item_titles: dict[str, str] = {}
+        if item_ids:
+            try:
+                items_response = (
+                    supabase.table("items").select("id,title").in_("id", list(item_ids)).execute()
+                )
+                item_titles = {row["id"]: row["title"] for row in items_response.data or []}
+            except Exception:
+                item_titles = {}
+
+        return [
+            {**r, "item_title": item_titles.get(r.get("item_id"))} for r in reservations
+        ]
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail="Failed to search reservations"
+        ) from exc
+
+
+@app.post("/staff/reservations/expire-stale", response_model=ExpiredReservationsResponse)
+def expire_stale_reservations(
+    http_request: Request,
+    x_staff_token: str | None = Header(default=None, alias="X-Staff-Token"),
+):
+    # 自動実行基盤(cron等)はこのリポジトリに無いため、本番では外部の定期
+    # 実行からこのAPI(またはRPCを直接)呼び出す(運用手順はREADMEの
+    # 「期限切れ予約の自動キャンセル」を参照)。pickup_window_endから猶予
+    # 30分を過ぎてもpendingのままの予約をcancelledにして在庫を返す。
+    # pickup_window_endを記録していない予約(RouteTestを経由しない予約)は
+    # 対象外で、statusがpending以外の予約にも影響しない。1回の呼び出しで
+    # 最大500件(RPCのbatch_size)。
+    require_staff_token(x_staff_token, resolve_client_ip(http_request))
+    try:
+        response = get_supabase().rpc("expire_stale_pending_reservations", {}).execute()
+        expired = response.data or []
+        return ExpiredReservationsResponse(
+            expired_count=len(expired),
+            expired_ids=[row["id"] for row in expired],
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail="Failed to expire stale reservations"
+        ) from exc
+
+
 @app.post("/routes/analyze", response_model=RouteAnalysisResponse)
 def analyze_route_endpoint(
     request: RouteAnalysisRequest,
@@ -484,7 +720,7 @@ def analyze_route_endpoint(
 ):
     require_route_analysis_client_key(x_client_key)
 
-    client_ip = http_request.client.host if http_request.client else "unknown"
+    client_ip = resolve_client_ip(http_request)
     enforce_route_analysis_rate_limit(client_ip)
 
     cache_key = _route_analysis_cache_key(request)

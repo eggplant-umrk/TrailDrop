@@ -1,5 +1,31 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import api from "../api/client";
+
+// 同一セッション内でスタッフトークンの再入力を不要にする(一括修正m8)。
+// sessionStorageに留め、localStorageには保存しない(端末に無期限で
+// 残さないため)。トークン自体をURLに含めたりログへ出したりはしない。
+const STAFF_TOKEN_SESSION_KEY = "traildrop_staff_token";
+
+function loadStaffToken() {
+  try {
+    return sessionStorage.getItem(STAFF_TOKEN_SESSION_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+function saveStaffToken(token) {
+  try {
+    if (token) {
+      sessionStorage.setItem(STAFF_TOKEN_SESSION_KEY, token);
+    } else {
+      sessionStorage.removeItem(STAFF_TOKEN_SESSION_KEY);
+    }
+  } catch {
+    // 保存できなくても致命的ではない(タブを閉じるまでの再入力省略ができ
+    // ないだけ)。
+  }
+}
 
 function formatJapanDateTime(value) {
   return new Intl.DateTimeFormat("ja-JP", {
@@ -86,6 +112,9 @@ const STATUS_MESSAGES = {
   404: "QRトークンが見つかりません。",
   409: "この予約はすでに受取済みです。",
   422: "QRトークンの形式が正しくありません。",
+  // staff認証の失敗回数によるレート制限(main.pyのSTAFF_AUTH_RATE_LIMIT)。
+  // Backendの英文detailをそのまま出さない。LOOKUP/SEARCHにも継承される。
+  429: "認証の試行回数が多すぎます。しばらく待ってからもう一度お試しください。",
   502: "QR検証に失敗しました。",
   503: "スタッフ認証が設定されていません。",
 };
@@ -96,6 +125,12 @@ const LOOKUP_STATUS_MESSAGES = {
   ...STATUS_MESSAGES,
   404: "予約が見つかりません。",
   502: "予約情報の取得に失敗しました。",
+};
+
+// GET /staff/reservations-search用。422(検索文字数不足)だけ独自の文言にする。
+const SEARCH_STATUS_MESSAGES = {
+  ...LOOKUP_STATUS_MESSAGES,
+  422: "予約者名を2文字以上入力してください。",
 };
 
 // verify_qrは409を「すでに受取済み(completed)」と「キャンセル済み
@@ -121,8 +156,19 @@ function resolveLookupErrorMessage(requestError) {
   );
 }
 
+function resolveSearchErrorMessage(requestError) {
+  return (
+    SEARCH_STATUS_MESSAGES[requestError?.status] ||
+    requestError?.message ||
+    "予約の検索に失敗しました。"
+  );
+}
+
 export default function StaffVerify() {
-  const [staffToken, setStaffToken] = useState("");
+  const [staffToken, setStaffToken] = useState(() => loadStaffToken());
+  useEffect(() => {
+    saveStaffToken(staffToken);
+  }, [staffToken]);
   const [qrToken, setQrToken] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -142,6 +188,37 @@ export default function StaffVerify() {
   // 変わっても自動では更新されない。スタッフが古い「受け渡し可能」を
   // 信じ続けないよう、取得した時刻(ブラウザの現在時刻)を併せて表示する。
   const [lookupFetchedAt, setLookupFetchedAt] = useState(null);
+
+  // 予約者名での検索(一括修正U7)。「予約されたか分からない」曖昧な失敗で
+  // 予約IDを受け取れなかった顧客を、スタッフが安全に探せるようにする。
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState(null);
+  const [searchResults, setSearchResults] = useState(null);
+
+  async function handleSearchSubmit(event) {
+    event.preventDefault();
+    if (!staffToken.trim() || !searchQuery.trim()) {
+      setSearchError({ message: "スタッフトークンと予約者名を入力してください。" });
+      return;
+    }
+
+    setSearchLoading(true);
+    setSearchError(null);
+    setSearchResults(null);
+
+    try {
+      const response = await api.searchStaffReservations(searchQuery.trim(), staffToken);
+      setSearchResults(response);
+    } catch (requestError) {
+      setSearchError({
+        status: requestError.status,
+        message: resolveSearchErrorMessage(requestError),
+      });
+    } finally {
+      setSearchLoading(false);
+    }
+  }
 
   async function handleSubmit(event) {
     event.preventDefault();
@@ -405,6 +482,83 @@ export default function StaffVerify() {
                 </dd>
               </div>
             </dl>
+          </section>
+        )}
+
+        {/* 予約者名での検索: 予約IDが分からない顧客(曖昧な失敗で予約作成が
+            成功したか分からない場合など)を、氏名の部分一致でスタッフが
+            安全に探せるようにする(一括修正U7)。他の利用者の予約を不用意に
+            一覧化しないよう、Backend側で最大件数・最小検索文字数を制限
+            している。 */}
+        <form
+          onSubmit={handleSearchSubmit}
+          className="space-y-4 bg-white p-4 shadow-sm rounded-md"
+        >
+          <h2 className="text-lg font-semibold">予約者名で探す</h2>
+          <p className="text-sm text-gray-600">
+            予約IDが分からない場合、予約者名（一部でも可）で予約を探せます。
+          </p>
+
+          <label className="block">
+            <span className="text-sm font-medium">予約者名</span>
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              required
+              className="mt-1 w-full rounded border border-gray-300 p-2"
+            />
+          </label>
+
+          {searchError && <p className="text-sm text-red-600">{searchError.message}</p>}
+
+          <button
+            type="submit"
+            disabled={searchLoading}
+            className={`w-full rounded px-4 py-2 font-medium text-white ${
+              searchLoading ? "bg-gray-400" : "bg-[#2f6f3e]"
+            }`}
+          >
+            {searchLoading ? "検索中…" : "予約者名で検索"}
+          </button>
+        </form>
+
+        {searchResults && (
+          <section className="bg-white p-4 shadow-sm rounded-md" aria-live="polite">
+            <h2 className="text-lg font-semibold mb-3">検索結果（{searchResults.length}件）</h2>
+            {searchResults.length === 0 ? (
+              <p className="text-sm text-gray-600">該当する予約が見つかりませんでした。</p>
+            ) : (
+              <ul className="space-y-3">
+                {searchResults.map((r) => {
+                  const statusDisplay =
+                    RESERVATION_STATUS_DISPLAY[r.status] || UNKNOWN_RESERVATION_STATUS_DISPLAY;
+                  return (
+                    <li key={r.id} className="rounded border border-gray-200 p-3 text-sm">
+                      <div className={`inline-block mb-2 rounded px-2 py-0.5 ${statusDisplay.className}`}>
+                        {statusDisplay.label}
+                      </div>
+                      <div className="font-mono text-xs text-gray-500 break-all">
+                        予約ID: {r.id}
+                      </div>
+                      <div>予約者名: {r.user_name}</div>
+                      <div>
+                        商品:{" "}
+                        {r.item_title || (
+                          <span className="text-gray-500">
+                            商品情報を取得できませんでした（ID: {r.item_id}）
+                          </span>
+                        )}
+                      </div>
+                      <div>
+                        予約日時: {r.reserved_at ? formatJapanDateTime(r.reserved_at) : "―"}
+                      </div>
+                      <div>受取時間帯: {formatPickupWindow(r.pickup_window_start, r.pickup_window_end)}</div>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
           </section>
         )}
       </div>
