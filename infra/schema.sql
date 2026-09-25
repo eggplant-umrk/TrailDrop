@@ -39,6 +39,14 @@ alter table public.reservations
     add column if not exists payment_method varchar,
     add column if not exists payment_status varchar not null default 'pending';
 
+-- Optional pickup time window (start/end), selected by the customer in
+-- RouteTest.jsx. Independent of requested_at (single exact time, experience
+-- items only); nullable so existing reservations and non-RouteTest flows
+-- are unaffected.
+alter table public.reservations
+    add column if not exists pickup_window_start timestamptz,
+    add column if not exists pickup_window_end timestamptz;
+
 -- Apply the tightened constraints when this script runs against an existing project.
 update public.reservations
 set qr_token = gen_random_uuid()
@@ -126,6 +134,22 @@ begin
             add constraint reservations_payment_status_check
             check (payment_status in ('pending', 'paid', 'cancelled'));
     end if;
+
+    -- Same shape as items_pickup_window_consistent above: both columns
+    -- null together, or both set with start strictly before end.
+    if not exists (
+        select 1
+        from pg_constraint
+        where conname = 'reservations_pickup_window_consistent'
+          and conrelid = 'public.reservations'::regclass
+    ) then
+        alter table public.reservations
+            add constraint reservations_pickup_window_consistent
+            check (
+                (pickup_window_start is null) = (pickup_window_end is null)
+                and (pickup_window_start is null or pickup_window_start < pickup_window_end)
+            );
+    end if;
 end
 $$;
 
@@ -147,17 +171,23 @@ grant select, insert, update on table public.reservations to service_role;
 
 drop function if exists public.create_reservation_with_stock(uuid, varchar);
 drop function if exists public.create_reservation_with_stock(uuid, varchar, timestamptz);
+drop function if exists public.create_reservation_with_stock(uuid, varchar, timestamptz, varchar);
 
 -- payment_method is validated both here (defense in depth) and, primarily,
 -- by the Backend's create_reservation() before this RPC is ever called.
 -- payment_status is always 'paid' on a successful insert: there is no real
 -- payment gateway, so the mock payment "succeeds" synchronously with stock
--- decrement, atomically, in this same transaction.
+-- decrement, atomically, in this same transaction. pickup_window_start/end
+-- are optional (RouteTest-selected pickup time range) and independent of
+-- requested_at; both null unless the Frontend sent a RouteTest-selected
+-- window.
 create or replace function public.create_reservation_with_stock(
     p_item_id uuid,
     p_user_name varchar,
     p_requested_at timestamptz default null,
-    p_payment_method varchar default null
+    p_payment_method varchar default null,
+    p_pickup_window_start timestamptz default null,
+    p_pickup_window_end timestamptz default null
 )
 returns setof public.reservations
 language plpgsql
@@ -193,13 +223,18 @@ begin
         raise exception 'REQUESTED_AT_IN_PAST' using errcode = '22023';
     end if;
 
-    insert into public.reservations (item_id, user_name, requested_at, payment_method, payment_status)
+    insert into public.reservations (
+        item_id, user_name, requested_at, payment_method, payment_status,
+        pickup_window_start, pickup_window_end
+    )
     values (
         p_item_id,
         p_user_name,
         case when item_type = 'experience' then p_requested_at else null end,
         p_payment_method,
-        'paid'
+        'paid',
+        p_pickup_window_start,
+        p_pickup_window_end
     )
     returning * into created_reservation;
 
@@ -207,9 +242,9 @@ begin
 end;
 $$;
 
-revoke all on function public.create_reservation_with_stock(uuid, varchar, timestamptz, varchar)
+revoke all on function public.create_reservation_with_stock(uuid, varchar, timestamptz, varchar, timestamptz, timestamptz)
 from public, anon, authenticated;
-grant execute on function public.create_reservation_with_stock(uuid, varchar, timestamptz, varchar)
+grant execute on function public.create_reservation_with_stock(uuid, varchar, timestamptz, varchar, timestamptz, timestamptz)
 to service_role;
 
 -- Cancels a pending reservation and returns one unit of stock to its item,
@@ -278,6 +313,84 @@ revoke all on function public.cancel_reservation_with_stock(uuid, uuid)
 from public, anon, authenticated;
 grant execute on function public.cancel_reservation_with_stock(uuid, uuid)
 to service_role;
+
+-- Pending reservations whose pickup_window_end has passed keep their stock
+-- reserved forever unless someone explicitly cancels them. This repository
+-- has no cron/scheduler infrastructure, so a staff-authenticated Backend
+-- endpoint (POST /staff/reservations/expire-stale) calls this on demand;
+-- production must run it periodically (cron etc., see the README runbook).
+-- Grace period: expired only once pickup_window_end + 30 minutes < now().
+-- Only reservations with a recorded pickup_window_end are eligible;
+-- reservations made without RouteTest (pickup_window_end null) are left
+-- untouched. Concurrency-safe for the same reason as
+-- cancel_reservation_with_stock's final UPDATE: the inner SELECT ... FOR
+-- UPDATE locks matching rows before the outer UPDATE writes to them, so a
+-- row already cancelled/completed concurrently is never double-processed.
+-- PM review m-2: capped at batch_size rows per call so a large backlog can't
+-- hold one transaction open indefinitely; call the endpoint again for more.
+create or replace function public.expire_stale_pending_reservations()
+returns setof public.reservations
+language plpgsql
+security invoker
+set search_path = ''
+as $$
+declare
+    expired_reservation public.reservations;
+    batch_size constant integer := 500;
+    grace_period constant interval := interval '30 minutes';
+begin
+    for expired_reservation in
+        update public.reservations
+        set status = 'cancelled',
+            payment_status = case when payment_status = 'paid' then 'cancelled' else payment_status end
+        where status = 'pending'
+          and id in (
+            select id
+            from public.reservations
+            where status = 'pending'
+              and pickup_window_end is not null
+              and pickup_window_end + grace_period < now()
+            order by pickup_window_end
+            limit batch_size
+            for update
+        )
+        returning *
+    loop
+        update public.items
+        set stock = stock + 1
+        where id = expired_reservation.item_id;
+
+        return next expired_reservation;
+    end loop;
+end;
+$$;
+
+revoke all on function public.expire_stale_pending_reservations()
+from public, anon, authenticated;
+grant execute on function public.expire_stale_pending_reservations()
+to service_role;
+
+-- Pickup locations with coordinates for route-based pickup selection
+-- (PICKUP_SELECTION_MODE=route). items stays linked by name
+-- (items.location_name = pickup_locations.name). No seed rows: real
+-- coordinates must be confirmed on site before inserting them. RLS with no
+-- policies + no anon/authenticated privileges: service_role only.
+create table if not exists public.pickup_locations (
+    id uuid primary key default gen_random_uuid(),
+    name varchar not null
+        constraint pickup_locations_name_key unique,
+    latitude double precision not null
+        constraint pickup_locations_latitude_range check (latitude between -90 and 90),
+    longitude double precision not null
+        constraint pickup_locations_longitude_range check (longitude between -180 and 180),
+    is_active boolean not null default true,
+    created_at timestamptz default now()
+);
+
+alter table public.pickup_locations enable row level security;
+
+revoke all on table public.pickup_locations from anon, authenticated;
+grant select on table public.pickup_locations to service_role;
 
 insert into public.items (id, title, type, price, stock, location_name)
 values

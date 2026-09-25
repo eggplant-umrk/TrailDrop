@@ -1,7 +1,11 @@
-fastapi
-uvicorn
-supabase
-pydantic
-python-dotenv
-httpx
-pytest
+# 直接依存はバージョンを固定する(CI・各開発環境で同じ版を使い、上流の
+# リリースで突然テストが壊れないようにするため)。いずれもCI(GitHub Actions,
+# Python 3.13)と開発環境でpytestが通ることを確認済みの版。
+# 更新するときは1つずつ上げ、pytestとCIが通ることを確認してから変更する。
+fastapi==0.141.1
+uvicorn==0.53.0
+supabase==2.31.0
+pydantic==2.13.5
+python-dotenv==1.2.3
+httpx==0.28.1
+pytest==9.1.1
