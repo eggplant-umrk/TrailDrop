@@ -2,6 +2,17 @@ const BASE = import.meta.env.VITE_API_BASE_URL || "";
 const DEMO_MODE = import.meta.env.VITE_DEMO_MODE === "true";
 const ROUTE_ANALYSIS_CLIENT_KEY = import.meta.env.VITE_ROUTE_ANALYSIS_CLIENT_KEY || "";
 
+// 通信が固まったまま返ってこない状態でUIを永久にloadingのまま止めない
+// ためのtimeout。予約作成がtimeoutした場合は、DEFINITELY_NOT_CREATED_
+// STATUSES(Reservation.jsx)に含まれないstatus無しのErrorを投げることで、
+// 既存の「曖昧な失敗」扱い(即再送を促さない)にそのまま乗せる。
+const DEFAULT_TIMEOUT_MS = 20000;
+// Backend(route_analysis.py)のGoogle呼び出し自体のtimeoutが15秒なので、
+// それより少し余裕を持たせる。
+const ROUTE_ANALYSIS_TIMEOUT_MS = 18000;
+const TIMEOUT_ERROR_MESSAGE =
+  "通信がタイムアウトしました。結果が不明なため、内容を確認してから再試行してください。";
+
 // main.pyのVALID_PAYMENT_METHODSと合わせる。実決済は行わないモック決済。
 const VALID_PAYMENT_METHODS = new Set(["paypay", "credit_card"]);
 
@@ -26,14 +37,30 @@ function errorMessage(json, status) {
   return `HTTP ${status}`;
 }
 
-async function request(path, options = {}) {
+async function request(path, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
   const url = BASE ? `${BASE}${path}` : null;
 
   if (!url) {
     throw new Error("VITE_API_BASE_URL is not configured");
   }
 
-  const res = await fetch(url, options);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  let res;
+  try {
+    res = await fetch(url, { ...options, signal: controller.signal });
+  } catch (e) {
+    // timeoutは「失敗した」と断定できない(リクエストがサーバーに届いた後で
+    // 応答だけが失われた可能性がある)ため、statusを付与しないErrorにする。
+    // Reservation.jsxのDEFINITELY_NOT_CREATED_STATUSESにstatus無しは含まれ
+    // ないため、既存の曖昧な失敗の扱いにそのまま乗る。
+    if (e?.name === "AbortError") {
+      throw new Error(TIMEOUT_ERROR_MESSAGE);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timeoutId);
+  }
   const text = await res.text();
   let json = null;
   try {
@@ -246,15 +273,47 @@ export async function cancelReservation(reservationId, reservationToken) {
   });
 }
 
+// DEMO_MODEでは実際のGoogle Routes APIを一切呼ばず、決定的なダミー結果を
+// 返す。route_analysis.py(Backend)と同じ形(pass_atはdeparture_atに固定の
+// 所要時間を足した値、pass_pointはdemoGetItems()の商品が実際に紐づく
+// location_name)にすることで、RouteTest.jsxの以降のロジック(受取時間の
+// 計算・商品の絞り込み)を本番と全く同じコードパスで動かせる。
+const DEMO_FIRST_LEG_MINUTES = 60;
+const DEMO_TOTAL_DURATION_MINUTES = 120;
+const DEMO_TOTAL_DISTANCE_METERS = 60000;
+// demoGetItems()の商品が実際に持つlocation_nameと一致させる。
+const DEMO_PASS_POINT = "道の駅 ロック・ガーデンひちそう";
+
+function demoAnalyzeRoute({ origin, destination, departure_at }) {
+  const departureDate = new Date(departure_at);
+  const passAt = new Date(departureDate.getTime() + DEMO_FIRST_LEG_MINUTES * 60000);
+  return {
+    origin,
+    destination,
+    pass_point: DEMO_PASS_POINT,
+    pass_at: passAt.toISOString(),
+    total_duration_minutes: DEMO_TOTAL_DURATION_MINUTES,
+    total_distance_meters: DEMO_TOTAL_DISTANCE_METERS,
+  };
+}
+
 export async function analyzeRoute({ origin, destination, departure_at }) {
-  return await request(`/routes/analyze`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Client-Key": ROUTE_ANALYSIS_CLIENT_KEY,
+  if (DEMO_MODE) {
+    await new Promise((r) => setTimeout(r, 200));
+    return demoAnalyzeRoute({ origin, destination, departure_at });
+  }
+  return await request(
+    `/routes/analyze`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Client-Key": ROUTE_ANALYSIS_CLIENT_KEY,
+      },
+      body: JSON.stringify({ origin, destination, departure_at }),
     },
-    body: JSON.stringify({ origin, destination, departure_at }),
-  });
+    ROUTE_ANALYSIS_TIMEOUT_MS,
+  );
 }
 
 export async function verifyQr(qrToken, staffToken) {
@@ -366,6 +425,69 @@ export async function getStaffReservation(reservationId, staffToken) {
   });
 }
 
+// 予約IDが分からない顧客(曖昧な失敗で予約IDを受け取れなかった場合など)を、
+// スタッフが氏名の部分一致で探せるようにする読み取り専用検索(一括修正U7)。
+// 他の利用者の予約を不用意に一覧化しないよう、Backend側で最大件数・最小
+// 検索文字数を制限している(main.pyのSTAFF_SEARCH_MAX_RESULTS/
+// STAFF_SEARCH_MIN_QUERY_LENGTH)。
+export async function searchStaffReservations(userName, staffToken) {
+  if (DEMO_MODE) {
+    if (!staffToken) {
+      const err = new Error("Invalid staff token");
+      err.status = 401;
+      throw err;
+    }
+    const trimmed = (userName || "").trim();
+    if (trimmed.length < 2) {
+      const err = new Error("user_name must be at least 2 characters");
+      err.status = 422;
+      throw err;
+    }
+    try {
+      const raw = sessionStorage.getItem("demo_reservations") || "{}";
+      const map = JSON.parse(raw);
+      const items = await getItems();
+      const needle = trimmed.toLowerCase();
+      return Object.values(map)
+        .filter((entry) => (entry.user_name || "").toLowerCase().includes(needle))
+        .sort((a, b) => new Date(b.reserved_at) - new Date(a.reserved_at))
+        .slice(0, 20)
+        .map((entry) => {
+          const found = items.find((it) => String(it.id) === String(entry.item_id));
+          return {
+            id: entry.id,
+            item_id: entry.item_id,
+            item_title: found?.title || null,
+            user_name: entry.user_name,
+            status: entry.status,
+            requested_at: entry.requested_at ?? null,
+            reserved_at: entry.reserved_at ?? null,
+            payment_method: entry.payment_method ?? null,
+            payment_status: entry.payment_status ?? null,
+            pickup_window_start: entry.pickup_window_start ?? null,
+            pickup_window_end: entry.pickup_window_end ?? null,
+          };
+        });
+    } catch (e) {
+      if (e && typeof e.status === "number") throw e;
+      const err = new Error("Failed to search reservations");
+      err.status = 502;
+      throw err;
+    }
+  }
+
+  // PMレビューm-3: 顧客の氏名がURL・アクセスログに残らないよう、GETの
+  // クエリパラメータではなくPOST + JSON bodyで送る。
+  return await request("/staff/reservations-search", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Staff-Token": staffToken,
+    },
+    body: JSON.stringify({ user_name: userName }),
+  });
+}
+
 export default {
   getItems,
   createReservation,
@@ -374,4 +496,5 @@ export default {
   analyzeRoute,
   verifyQr,
   getStaffReservation,
+  searchStaffReservations,
 };

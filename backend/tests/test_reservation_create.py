@@ -486,3 +486,173 @@ class TestReservationErrorPickupWindowCheckViolation:
         http_exc = main.reservation_error(exc)
 
         assert http_exc.status_code != 502
+
+
+class TestCreateReservationUserName:
+    """一括修正m4: user_nameをBackendでもtrim・空白のみ拒否・長さ制限する。
+    RPCへ到達する前に弾かれるため、いずれもrpc_call_count == 0。
+    """
+
+    def test_blank_user_name_is_rejected(self, client, fake_supabase):
+        response = create(client, user_name="   ", payment_method="paypay")
+
+        assert response.status_code == 422
+        assert fake_supabase.rpc_call_count == 0
+
+    def test_user_name_is_trimmed(self, client, fake_supabase):
+        response = create(client, user_name="  テスト太郎  ", payment_method="paypay")
+
+        assert response.status_code == 201
+        assert response.json()["user_name"] == "テスト太郎"
+
+    def test_overly_long_user_name_is_rejected(self, client, fake_supabase):
+        response = create(client, user_name="あ" * 101, payment_method="paypay")
+
+        assert response.status_code == 422
+        assert fake_supabase.rpc_call_count == 0
+
+    def test_user_name_at_max_length_succeeds(self, client, fake_supabase):
+        response = create(client, user_name="あ" * 100, payment_method="paypay")
+
+        assert response.status_code == 201
+
+
+class TestCreateReservationPickupWindowPastAndDuration:
+    """PMレビューBLOCKER B1修正: 「受取時間帯が完全に過去(end<=now)」の場合
+    のみ拒否し、「startだけが過去でendは未来」(受取枠の途中)は許可する。
+    RouteTest.jsxのオフセットスライダー(±180分、変更しない仕様)は、
+    pass_atが近い将来の場合にwindowStart = pass_at + (offset-60分)だけが
+    過去になり得るため、これを拒否すると既存のオフセット機能を壊してしまう
+    (PMレビューで実際に再現された回帰)。
+    """
+
+    def test_start_past_end_future_succeeds(self, client, fake_supabase):
+        # RouteTestのオフセットスライダーで大きくマイナス側へ振った場合と
+        # 同じ形(受取枠の途中に差し掛かっている状態)。
+        start = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+        end = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
+
+        response = create(
+            client,
+            payment_method="paypay",
+            pickup_window_start=start,
+            pickup_window_end=end,
+        )
+
+        assert response.status_code == 201
+        assert fake_supabase.rpc_call_count == 1
+
+    def test_start_and_end_both_future_succeeds(self, client, fake_supabase):
+        start = future_iso(days=1)
+        end = (datetime.now(timezone.utc) + timedelta(days=1, minutes=120)).isoformat()
+
+        response = create(
+            client,
+            payment_method="paypay",
+            pickup_window_start=start,
+            pickup_window_end=end,
+        )
+
+        assert response.status_code == 201
+
+    def test_both_past_is_rejected(self, client, fake_supabase):
+        start = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        end = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+
+        response = create(
+            client,
+            payment_method="paypay",
+            pickup_window_start=start,
+            pickup_window_end=end,
+        )
+
+        assert response.status_code == 422
+        assert fake_supabase.rpc_call_count == 0
+
+    def test_end_exactly_now_is_rejected(self, client, fake_supabase):
+        # end <= now の境界(ちょうど今終わる受取枠)は拒否する。
+        now = datetime.now(timezone.utc)
+        start = (now - timedelta(minutes=60)).isoformat()
+        end = now.isoformat()
+
+        response = create(
+            client,
+            payment_method="paypay",
+            pickup_window_start=start,
+            pickup_window_end=end,
+        )
+
+        assert response.status_code == 422
+        assert fake_supabase.rpc_call_count == 0
+
+    def test_routetest_offset_minus_180_with_near_term_pass_at_succeeds(
+        self, client, fake_supabase
+    ):
+        # RouteTest.jsxのwindowStart/windowEnd計算を実際に再現する:
+        # windowStart = pass_at + (offset - 60分), windowEnd = pass_at + (offset + 60分)。
+        # pass_atが30分後、offset=-180(スライダーの最も過去寄り、既存UIの
+        # 通常操作範囲内)だと、windowStartは過去・windowEndも計算上は
+        # (30 - 180 + 60 = -90分)過去になるため422が正しい。
+        pass_at = datetime.now(timezone.utc) + timedelta(minutes=30)
+        offset = -180
+        window_start = pass_at + timedelta(minutes=offset - 60)
+        window_end = pass_at + timedelta(minutes=offset + 60)
+        assert window_end <= datetime.now(timezone.utc)  # このケースはendも過去
+
+        response = create(
+            client,
+            payment_method="paypay",
+            pickup_window_start=window_start.isoformat(),
+            pickup_window_end=window_end.isoformat(),
+        )
+
+        assert response.status_code == 422
+
+    def test_routetest_offset_minus_60_with_near_term_pass_at_succeeds(
+        self, client, fake_supabase
+    ):
+        # 同じRouteTestの計算式で、offset=-60(startだけが過去、endは未来)
+        # というPMレビューで指摘された実際のバグ再現ケース。修正後はこれが
+        # 201で成功しなければならない。
+        pass_at = datetime.now(timezone.utc) + timedelta(minutes=30)
+        offset = -60
+        window_start = pass_at + timedelta(minutes=offset - 60)
+        window_end = pass_at + timedelta(minutes=offset + 60)
+        assert window_start < datetime.now(timezone.utc) < window_end
+
+        response = create(
+            client,
+            payment_method="paypay",
+            pickup_window_start=window_start.isoformat(),
+            pickup_window_end=window_end.isoformat(),
+        )
+
+        assert response.status_code == 201
+
+    def test_overly_long_pickup_window_is_rejected(self, client, fake_supabase):
+        start = future_iso(days=1)
+        end = (datetime.now(timezone.utc) + timedelta(days=1, hours=8)).isoformat()
+
+        response = create(
+            client,
+            payment_method="paypay",
+            pickup_window_start=start,
+            pickup_window_end=end,
+        )
+
+        assert response.status_code == 422
+        assert fake_supabase.rpc_call_count == 0
+
+    def test_normal_120_minute_window_succeeds(self, client, fake_supabase):
+        # RouteTest.jsxの通常フローと同じ幅(WINDOW_DURATION_MINUTES=120)。
+        start = future_iso(days=1)
+        end = (datetime.now(timezone.utc) + timedelta(days=1, minutes=120)).isoformat()
+
+        response = create(
+            client,
+            payment_method="paypay",
+            pickup_window_start=start,
+            pickup_window_end=end,
+        )
+
+        assert response.status_code == 201

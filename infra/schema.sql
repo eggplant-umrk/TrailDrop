@@ -314,6 +314,62 @@ from public, anon, authenticated;
 grant execute on function public.cancel_reservation_with_stock(uuid, uuid)
 to service_role;
 
+-- Pending reservations whose pickup_window_end has passed keep their stock
+-- reserved forever unless someone explicitly cancels them. This repository
+-- has no cron/scheduler infrastructure, so a staff-authenticated Backend
+-- endpoint (POST /staff/reservations/expire-stale) calls this on demand;
+-- production must run it periodically (cron etc., see the README runbook).
+-- Grace period: expired only once pickup_window_end + 30 minutes < now().
+-- Only reservations with a recorded pickup_window_end are eligible;
+-- reservations made without RouteTest (pickup_window_end null) are left
+-- untouched. Concurrency-safe for the same reason as
+-- cancel_reservation_with_stock's final UPDATE: the inner SELECT ... FOR
+-- UPDATE locks matching rows before the outer UPDATE writes to them, so a
+-- row already cancelled/completed concurrently is never double-processed.
+-- PM review m-2: capped at batch_size rows per call so a large backlog can't
+-- hold one transaction open indefinitely; call the endpoint again for more.
+create or replace function public.expire_stale_pending_reservations()
+returns setof public.reservations
+language plpgsql
+security invoker
+set search_path = ''
+as $$
+declare
+    expired_reservation public.reservations;
+    batch_size constant integer := 500;
+    grace_period constant interval := interval '30 minutes';
+begin
+    for expired_reservation in
+        update public.reservations
+        set status = 'cancelled',
+            payment_status = case when payment_status = 'paid' then 'cancelled' else payment_status end
+        where status = 'pending'
+          and id in (
+            select id
+            from public.reservations
+            where status = 'pending'
+              and pickup_window_end is not null
+              and pickup_window_end + grace_period < now()
+            order by pickup_window_end
+            limit batch_size
+            for update
+        )
+        returning *
+    loop
+        update public.items
+        set stock = stock + 1
+        where id = expired_reservation.item_id;
+
+        return next expired_reservation;
+    end loop;
+end;
+$$;
+
+revoke all on function public.expire_stale_pending_reservations()
+from public, anon, authenticated;
+grant execute on function public.expire_stale_pending_reservations()
+to service_role;
+
 insert into public.items (id, title, type, price, stock, location_name)
 values
     (

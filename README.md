@@ -49,6 +49,42 @@ supabase start
 
 別ターミナルでフロントエンドとバックエンドを起動します。バックエンドは `backend/.env` の `SUPABASE_URL` と `SUPABASE_SERVICE_ROLE_KEY` を使ってSupabase APIへ接続します。予約照会には、予約作成レスポンスに含まれる `access_token` を `X-Reservation-Token` ヘッダーで指定します。これはQR検証用の `qr_token` やスタッフ用の `X-Staff-Token` とは別のトークンです。
 
+## 運用
+
+### 期限切れ予約の自動キャンセル
+
+受取時間帯（`pickup_window_end`）を過ぎても受け取られない `pending` 予約は、そのままだと在庫を確保し続けます。これを解放するため、RPC `expire_stale_pending_reservations()` を用意しています。
+
+- **対象**: `status = 'pending'` かつ `pickup_window_end + 30分 < 現在時刻` の予約（猶予30分。渋滞などで少し遅れた受取に対応するため）。
+- **処理**: 対象予約を `cancelled` にし（決済済みなら `payment_status` も `cancelled`）、在庫を1つ戻します。予約1件ごとに状態変更と在庫返却は同じトランザクションで行われ、顧客キャンセル・QR受取確認と同時に実行されても二重に在庫が戻ることはありません。
+- **1回の上限**: 最大500件。残りがあれば次回の実行で処理されます。
+- **ステータス**: 期限切れも顧客によるキャンセルも同じ `cancelled` です（MVPでは区別しません）。
+
+**本番では、cron等でこの処理を定期実行する必要があります。** このリポジトリには定期実行の仕組み自体は含まれていません。推奨頻度は **10分ごと** です（何度実行しても安全です）。
+
+APIで実行する例（`X-Staff-Token` 必須。認証に失敗するとレート制限の対象になります）:
+
+```bash
+curl -X POST "https://<backend-host>/staff/reservations/expire-stale" \
+  -H "X-Staff-Token: $STAFF_API_TOKEN"
+# => {"expired_count": 2, "expired_ids": ["...", "..."]}
+```
+
+SQLで実行する例（Supabase SQL Editor、または pg_cron を有効にしたプロジェクト）:
+
+```sql
+select id, item_id, pickup_window_end from public.expire_stale_pending_reservations();
+
+-- pg_cronを使う場合の例（10分ごと）
+select cron.schedule(
+  'expire-stale-pending-reservations',
+  '*/10 * * * *',
+  $$select public.expire_stale_pending_reservations()$$
+);
+```
+
+**既知の制約**: `pickup_window_end` が無い予約（ルート分析を経由せず商品一覧から直接行った予約、受取時間帯の機能より前に作られた予約）は、この自動期限切れの対象外です。これらの予約は、顧客によるキャンセルまたはスタッフの対応がない限り在庫を確保し続けます。
+
 ## 技術スタック
 
 - フロントエンド: React (Vite) + Tailwind CSS

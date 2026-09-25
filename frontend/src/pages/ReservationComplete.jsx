@@ -3,10 +3,14 @@ import { useLocation, useParams, useNavigate } from "react-router-dom";
 import { QRCodeCanvas } from "qrcode.react";
 import api from "../api/client";
 import {
+  clearAccessToken,
   isAccessTokenPersisted,
   loadAccessToken,
+  loadFinalizedStatus,
   saveAccessToken,
+  saveFinalizedStatus,
 } from "../utils/reservationAccess";
+import { loadRouteContext } from "../utils/routeContext";
 
 function formatRequestedAt(value) {
   return new Intl.DateTimeFormat("ja-JP", {
@@ -42,6 +46,14 @@ function formatPickupWindow(startValue, endValue) {
     hourCycle: "h23",
   });
   return `${dateFormatter.format(new Date(startValue))}〜${timeFormatter.format(new Date(endValue))}`;
+}
+
+// "HH:MM:SS" / "HH:MM" から表示用の"HH:MM"を取り出す(ItemList.jsx/
+// RouteTest.jsxと同じ抽出方法)。一括修正U2: 商品自体の営業時間を表示する。
+function formatPickupHours(value) {
+  if (typeof value !== "string") return null;
+  const match = value.match(/^(\d{2}):(\d{2})/);
+  return match ? `${match[1]}:${match[2]}` : null;
 }
 
 function buildGoogleMapsUrl({ destination, passPoint }) {
@@ -141,6 +153,9 @@ export default function ReservationComplete() {
   // 「取得できませんでした」と表示する。
   const [itemTitle, setItemTitle] = useState(null);
   const [itemTitleError, setItemTitleError] = useState(false);
+  // 商品自体の営業時間(一括修正U2)。itemTitleと同じ取得ライフサイクルで
+  // 一緒に埋める。
+  const [itemPickupHours, setItemPickupHours] = useState(null);
 
   const mountedRef = useRef(true);
   useEffect(() => {
@@ -171,17 +186,43 @@ export default function ReservationComplete() {
     try {
       const accessToken = getAccessToken();
 
-      if (!accessToken && import.meta.env.VITE_API_BASE_URL) {
-        throw new Error("予約トークンが見つかりません");
+      if (!accessToken) {
+        // PMレビューMAJOR M1: completed/cancelledになった時点でaccess_tokenは
+        // 意図的に端末から削除している(セキュリティ上の設計、下のclearAccess
+        // Token呼び出し箇所を参照)。そのため、リロード・別タブでの再アクセス
+        // や、完了/キャンセル後にもう一度更新ボタンを押した場合にトークンが
+        // 無いのは「通信の失敗」ではなく想定通りの状態であり、それを
+        // 「通信環境を確認して再度お試しください」という紛らわしい文言で
+        // 表示してはいけない。事前に記録しておいたfinalized statusがあれば、
+        // 実際の通信は行わずにその旨を案内する。
+        const finalizedStatus = loadFinalizedStatus(id);
+        if (finalizedStatus === "completed" || finalizedStatus === "cancelled") {
+          const message =
+            finalizedStatus === "completed"
+              ? "この予約はすでに受取済みです。セキュリティのためこの端末に保存していたトークンは削除済みのため、これ以上の更新はできません。詳細は受取窓口にお問い合わせください。"
+              : "この予約はすでにキャンセル済みです。セキュリティのためこの端末に保存していたトークンは削除済みのため、これ以上の更新はできません。";
+          if (isInitial) setInitialError(message);
+          else setRefreshError(message);
+          return;
+        }
+        if (import.meta.env.VITE_API_BASE_URL) {
+          throw new Error("予約トークンが見つかりません");
+        }
       }
 
       const res = await api.getReservation(id, accessToken);
       if (!mountedRef.current) return;
       setReservation(res);
-      // 予約作成直後の保存に失敗していた場合(location.stateのみで到達した
-      // 場合など)に備え、照会に成功したaccess_tokenをこの端末へ保存し直す。
-      // 保存できたかどうかを案内表示に使う。
-      if (accessToken) {
+      if (res.status === "completed" || res.status === "cancelled") {
+        // 受取済み・キャンセル済みになった予約はもうQRを再表示する必要が
+        // 無いため、access_tokenを端末に無期限で残さない(一括修正m1)。
+        clearAccessToken(id);
+        saveFinalizedStatus(id, res.status);
+        setPersisted(false);
+      } else if (accessToken) {
+        // 予約作成直後の保存に失敗していた場合(location.stateのみで到達した
+        // 場合など)に備え、照会に成功したaccess_tokenをこの端末へ保存し直す。
+        // 保存できたかどうかを案内表示に使う。
         setPersisted(saveAccessToken(id, accessToken));
       }
     } catch (e) {
@@ -214,6 +255,10 @@ export default function ReservationComplete() {
       // そのまま反映する。在庫返却もそのRPC内で同時に行われている前提で、
       // Frontend側では在庫に関する処理を一切行わない。
       setReservation(res);
+      // キャンセル完了時点でaccess_tokenはもう不要(一括修正m1)。
+      clearAccessToken(id);
+      saveFinalizedStatus(id, res.status);
+      setPersisted(false);
       setCancelConfirming(false);
     } catch (e) {
       if (!mountedRef.current) return;
@@ -234,6 +279,7 @@ export default function ReservationComplete() {
     let mounted = true;
     setItemTitle(null);
     setItemTitleError(false);
+    setItemPickupHours(null);
 
     async function loadItemTitle() {
       try {
@@ -242,6 +288,11 @@ export default function ReservationComplete() {
         if (mounted) {
           setItemTitle(found?.title || null);
           setItemTitleError(!found?.title);
+          setItemPickupHours(
+            found?.pickup_available_from && found?.pickup_available_to
+              ? { from: found.pickup_available_from, to: found.pickup_available_to }
+              : null,
+          );
         }
       } catch (e) {
         if (mounted) {
@@ -259,9 +310,9 @@ export default function ReservationComplete() {
 
   // RouteTest経由で予約した場合のみ、Google Maps引き継ぎに使う経路情報を持つ。
   // ItemListから直接予約した場合や、stateを保持しないリロード直後は
-  // location.stateが空になるため、access_tokenと同じくsessionStorageへ
-  // フォールバックする。いずれにもなければroute情報はnullのままとし、
-  // 目的地を推測で補うことはしない。
+  // location.stateが空になるため、access_tokenと同じくlocalStorage(TTL付き、
+  // 別タブでも復元できる。一括修正U6)へフォールバックする。いずれにも
+  // なければroute情報はnullのままとし、目的地を推測で補うことはしない。
   let routeContext =
     location.state?.origin && location.state?.destination && location.state?.passPoint
       ? {
@@ -273,13 +324,9 @@ export default function ReservationComplete() {
 
   if (!routeContext) {
     try {
-      const raw = sessionStorage.getItem(`traildrop_route_${id}`);
-      const parsed = raw ? JSON.parse(raw) : null;
-      if (parsed?.origin && parsed?.destination && parsed?.passPoint) {
-        routeContext = parsed;
-      }
+      routeContext = loadRouteContext(id);
     } catch (e) {
-      // 壊れたsessionStorageの内容はroute情報なしとして扱う。
+      // 壊れたstorageの内容はroute情報なしとして扱う。
     }
   }
 
@@ -298,6 +345,12 @@ export default function ReservationComplete() {
 
   const statusDisplay = STATUS_DISPLAY[reservation.status] || UNKNOWN_STATUS_DISPLAY;
   const isPending = reservation.status === "pending";
+  // PMレビューMAJOR M1: completed/cancelledはaccess_tokenを既に削除済み
+  // (このタブのstateにまだ残っていれば直近の更新自体は成功し得るが、
+  // 最終状態はこれ以上変わらないため再取得する意味が無い)。押せてしまうと
+  // 次にトークンが無くなったタイミングで紛らわしい通信エラー表示に
+  // つながるため、最終状態になった時点で更新ボタンごと無効化する。
+  const isFinalStatus = reservation.status === "completed" || reservation.status === "cancelled";
 
   return (
     <div className="min-h-screen p-4 bg-[#fffef6] text-[#16381b] flex flex-col items-center">
@@ -318,6 +371,12 @@ export default function ReservationComplete() {
             </span>
           )}
         </div>
+        {itemPickupHours && (
+          <div className="mb-3 text-sm text-gray-600">
+            商品受取可能時間: {formatPickupHours(itemPickupHours.from)}
+            〜{formatPickupHours(itemPickupHours.to)}
+          </div>
+        )}
         {reservation.requested_at && (
           <div className="mb-3">希望日時: {formatRequestedAt(reservation.requested_at)}</div>
         )}
@@ -415,23 +474,26 @@ export default function ReservationComplete() {
           </>
         )}
 
-        <button
-          type="button"
-          onClick={() => {
-            fetchReservation({ isInitial: false });
-            setItemReloadKey((count) => count + 1);
-          }}
-          disabled={refreshing || cancelling || cancelConfirming}
-          aria-busy={refreshing}
-          className={`mt-4 w-full rounded px-4 py-2 text-sm ${
-            refreshing ? "bg-gray-100 text-gray-400" : "bg-gray-200"
-          }`}
-        >
-          {refreshing ? "更新中…" : "最新の状態に更新"}
-        </button>
+        {!isFinalStatus && (
+          <button
+            type="button"
+            onClick={() => {
+              fetchReservation({ isInitial: false });
+              setItemReloadKey((count) => count + 1);
+            }}
+            disabled={refreshing || cancelling || cancelConfirming}
+            aria-busy={refreshing}
+            className={`mt-4 w-full rounded px-4 py-2 text-sm ${
+              refreshing ? "bg-gray-100 text-gray-400" : "bg-gray-200"
+            }`}
+          >
+            {refreshing ? "更新中…" : "最新の状態に更新"}
+          </button>
+        )}
         {refreshError && (
           <p className="mt-2 text-sm text-red-600" role="alert">
-            {refreshError}（表示中の予約情報は変更していません）
+            {refreshError}
+            {!isFinalStatus && "（表示中の予約情報は変更していません）"}
           </p>
         )}
 

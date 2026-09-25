@@ -1,6 +1,39 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import api from "../api/client";
+
+// RouteTestの入力・分析結果をlocalStorageに保存し、Reservationからの戻る
+// 操作・リロード・別タブでも再実行(Google Routes APIの再呼び出し)無しで
+// 復元できるようにする(一括修正m7・U6)。TTLを設け、古い分析結果を無期限に
+// 使い続けないようにする。
+const ROUTE_TEST_STATE_KEY = "traildrop_route_test_state";
+const ROUTE_TEST_STATE_TTL_MS = 20 * 60 * 1000; // 20分
+
+export function loadRouteTestState() {
+  try {
+    const raw = localStorage.getItem(ROUTE_TEST_STATE_KEY);
+    if (!raw) return null;
+    const state = JSON.parse(raw);
+    if (!state?.savedAt || Date.now() - state.savedAt > ROUTE_TEST_STATE_TTL_MS) {
+      localStorage.removeItem(ROUTE_TEST_STATE_KEY);
+      return null;
+    }
+    return state;
+  } catch {
+    return null;
+  }
+}
+
+export function saveRouteTestState(state) {
+  try {
+    localStorage.setItem(
+      ROUTE_TEST_STATE_KEY,
+      JSON.stringify({ ...state, savedAt: Date.now() }),
+    );
+  } catch {
+    // 保存できなくても致命的ではない(戻った際に復元されないだけ)。
+  }
+}
 
 function formatJapanDateTime(value) {
   return new Intl.DateTimeFormat("ja-JP", {
@@ -24,7 +57,7 @@ function formatJapanTime(date) {
 
 // dateが指すJST上の「その日の0時からの経過分」。深夜またぎ(前日/翌日をまたぐ受取枠)
 // は今回のスコープ外のため、日付をまたいだ比較は正しく扱わない前提でよい。
-function jstMinutesSinceMidnight(date) {
+export function jstMinutesSinceMidnight(date) {
   const parts = new Intl.DateTimeFormat("ja-JP", {
     timeZone: "Asia/Tokyo",
     hour: "2-digit",
@@ -37,7 +70,7 @@ function jstMinutesSinceMidnight(date) {
 }
 
 // "HH:MM:SS" / "HH:MM" (Supabaseのtime型がJSONで返す形式) を0時からの経過分へ。
-function parseTimeStringToMinutes(value) {
+export function parseTimeStringToMinutes(value) {
   if (typeof value !== "string") return null;
   const match = value.match(/^(\d{2}):(\d{2})/);
   if (!match) return null;
@@ -47,7 +80,7 @@ function parseTimeStringToMinutes(value) {
 // "HH:MM:SS" / "HH:MM" から表示用の"HH:MM"を取り出す。time型には日付・
 // timezoneの概念が無いため、Dateへの変換は行わず文字列のまま扱う
 // (parseTimeStringToMinutesと同じ抽出方法)。
-function formatPickupHours(value) {
+export function formatPickupHours(value) {
   if (typeof value !== "string") return null;
   const match = value.match(/^(\d{2}):(\d{2})/);
   return match ? `${match[1]}:${match[2]}` : null;
@@ -60,7 +93,7 @@ function formatPickupHours(value) {
 // が収まっているかどうかを判定する。受取可能時間が未設定(null)の商品は
 // 「常に受け取れる」とは解釈せず、対象外とする。境界(ちょうど開店・閉店時刻)
 // は利用可として扱う。
-function isItemAvailableAt(item, effectiveMinutes) {
+export function isItemAvailableAt(item, effectiveMinutes) {
   const itemStart = parseTimeStringToMinutes(item.pickup_available_from);
   const itemEnd = parseTimeStringToMinutes(item.pickup_available_to);
   if (itemStart === null || itemEnd === null) {
@@ -75,10 +108,12 @@ const WINDOW_OFFSET_STEP_MINUTES = 30;
 const WINDOW_OFFSET_MAX_MINUTES = 180;
 
 export default function RouteTest() {
-  const [origin, setOrigin] = useState("名古屋駅");
-  const [destination, setDestination] = useState("下呂温泉");
-  const [departureAt, setDepartureAt] = useState("");
-  const [result, setResult] = useState(null);
+  // 起動時に1度だけ復元を試みる(TTL切れ・壊れたデータはnullになる)。
+  const initialRouteState = loadRouteTestState();
+  const [origin, setOrigin] = useState(initialRouteState?.origin ?? "名古屋駅");
+  const [destination, setDestination] = useState(initialRouteState?.destination ?? "下呂温泉");
+  const [departureAt, setDepartureAt] = useState(initialRouteState?.departureAt ?? "");
+  const [result, setResult] = useState(initialRouteState?.result ?? null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
 
@@ -91,7 +126,24 @@ export default function RouteTest() {
   // 受取枠(2時間固定)の中心を、既定の通過予定時刻からどれだけずらしたか(分)。
   // 枠の計算・重なり判定は取得済みのmatchedItemsに対する派生値として毎レンダー
   // 計算するだけなので、この値を変えてもAPI通信は一切発生しない。
-  const [windowOffsetMinutes, setWindowOffsetMinutes] = useState(0);
+  const [windowOffsetMinutes, setWindowOffsetMinutes] = useState(
+    initialRouteState?.windowOffsetMinutes ?? 0,
+  );
+
+  // 分析結果を復元できた場合、商品一覧はGET /items(無料・軽量)だけ再実行
+  // して埋め直す。Google Routes APIを再度呼ぶことはない。
+  useEffect(() => {
+    if (initialRouteState?.result?.pass_point) {
+      loadMatchingItems(initialRouteState.result.pass_point);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 入力・分析結果・受取枠offsetが変わるたびに保存し直す(戻る操作・
+  // リロード・別タブでの復元用)。
+  useEffect(() => {
+    saveRouteTestState({ origin, destination, departureAt, result, windowOffsetMinutes });
+  }, [origin, destination, departureAt, result, windowOffsetMinutes]);
 
   async function loadMatchingItems(passPoint) {
     setItemsLoading(true);
@@ -150,6 +202,12 @@ export default function RouteTest() {
           (windowOffsetMinutes + WINDOW_HALF_DURATION_MINUTES) * 60000,
       )
     : null;
+
+  // 受取時間帯が完全に終了しているか(windowEnd <= 現在時刻)。startだけが
+  // 過去でendが未来なら受取枠の途中であり、まだ予約できる(PMレビュー
+  // BLOCKER B1: startが過去というだけでは拒否しない。Backend側の
+  // model_validatorと同じ基準)。
+  const isPickupWindowExpired = windowEndDate ? windowEndDate.getTime() <= Date.now() : false;
 
   // 実効受取予定時刻(windowOffsetMinutesだけ通過予定時刻をずらした、実際に
   // 受取枠の中心となる瞬間)。表示・予約への引き継ぎに使う2時間幅の受取枠
@@ -255,6 +313,16 @@ export default function RouteTest() {
               <p className="mt-1 text-sm text-gray-600">
                 受取時間: {formatJapanTime(windowStartDate)}〜{formatJapanTime(windowEndDate)}
               </p>
+              {/* 商品の営業時間内判定はeffectiveDate(この時刻)の一点で行って
+                  いるため、「受取時間(枠)」とは別に明示する(一括修正U3)。 */}
+              <p className="mt-1 text-xs text-gray-500">
+                受取予定: {formatJapanTime(effectiveDate)}（このルートで受け取れる商品は、この時刻を基準に判定しています）
+              </p>
+              {isPickupWindowExpired && (
+                <p className="mt-1 text-sm text-red-600" role="alert">
+                  受取時間帯が終了しています。受取時間をずらすか、もう一度ルート分析をやり直してください。
+                </p>
+              )}
               <input
                 type="range"
                 min={-WINDOW_OFFSET_MAX_MINUTES}
@@ -317,7 +385,10 @@ export default function RouteTest() {
                           )}
                         </div>
                         <div className="text-sm text-gray-600">{item.location_name}</div>
-                        <div className="text-sm mt-1">¥{item.price}（残り{item.stock}）</div>
+                        <div className="text-sm mt-1">
+                          ¥{item.price}
+                          {item.stock > 0 ? `（残り${item.stock}）` : "（在庫切れ）"}
+                        </div>
                         {/* ユーザーが選択した「受取時間」(上のセクション)とは別物と
                             分かるよう、商品自体の営業時間であることを明示するラベル
                             にする。片方でも未設定なら表示しない(既存のNULL扱いと
@@ -329,19 +400,28 @@ export default function RouteTest() {
                           </div>
                         )}
                       </div>
-                      <Link
-                        to={`/reserve/${item.id}`}
-                        state={{
-                          origin: result.origin,
-                          destination: result.destination,
-                          passPoint: result.pass_point,
-                          pickupWindowStart: windowStartDate.toISOString(),
-                          pickupWindowEnd: windowEndDate.toISOString(),
-                        }}
-                        className="shrink-0 rounded px-3 py-2 text-sm font-medium text-white bg-[#2f6f3e]"
-                      >
-                        予約へ進む
-                      </Link>
+                      {item.stock > 0 && !isPickupWindowExpired ? (
+                        <Link
+                          to={`/reserve/${item.id}`}
+                          state={{
+                            origin: result.origin,
+                            destination: result.destination,
+                            passPoint: result.pass_point,
+                            pickupWindowStart: windowStartDate.toISOString(),
+                            pickupWindowEnd: windowEndDate.toISOString(),
+                          }}
+                          className="shrink-0 rounded px-3 py-2 text-sm font-medium text-white bg-[#2f6f3e]"
+                        >
+                          予約へ進む
+                        </Link>
+                      ) : (
+                        <span
+                          aria-disabled="true"
+                          className="shrink-0 rounded px-3 py-2 text-sm font-medium text-gray-500 bg-gray-200 cursor-not-allowed"
+                        >
+                          {item.stock > 0 ? "受取時間帯終了" : "在庫切れ"}
+                        </span>
+                      )}
                     </li>
                   ))}
                 </ul>
