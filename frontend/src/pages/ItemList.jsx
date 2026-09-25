@@ -1,7 +1,13 @@
 import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import api from "../api/client";
-import { AppLayout, formatYen, primaryButtonClass, secondaryButtonClass } from "../components/ui";
+import {
+  AppLayout,
+  formatYen,
+  primaryButtonClass,
+  secondaryButtonClass,
+  StockLabel,
+} from "../components/ui";
 import { toUserMessage } from "../utils/errorMessages";
 import { formatPickupHours } from "../utils/pickupHours";
 
@@ -101,8 +107,8 @@ export default function ItemList() {
               </div>
               <div className="shrink-0 text-right">
                 <p className="text-lg font-bold">{formatYen(it.price)}</p>
-                <p className={`text-xs ${it.stock > 0 ? "text-gray-600" : "font-medium text-red-600"}`}>
-                  {it.stock > 0 ? `残り${it.stock}` : "在庫切れ"}
+                <p className="mt-0.5">
+                  <StockLabel stock={it.stock} />
                 </p>
               </div>
             </div>
