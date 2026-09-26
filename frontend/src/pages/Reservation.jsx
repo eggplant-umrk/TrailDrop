@@ -6,6 +6,8 @@ import { saveRouteContext } from "../utils/routeContext";
 import { isPickupWindowEnded, msUntilPickupWindowEnds } from "../utils/pickupWindow";
 import { toUserMessage } from "../utils/errorMessages";
 import { formatPickupHours } from "../utils/pickupHours";
+import { getShopName } from "../utils/shopNames";
+import ItemThumbnail from "../components/ItemThumbnail";
 import {
   AppLayout,
   formatYen,
@@ -211,6 +213,9 @@ export default function Reservation() {
             location: found.location_name,
             requiresDate: found.type === "experience",
             stock: found.stock,
+            shopId: found.shop_id,
+            description: found.description,
+            contentAmount: found.content_amount,
             pickupAvailableFrom: found.pickup_available_from,
             pickupAvailableTo: found.pickup_available_to,
           });
@@ -465,12 +470,16 @@ export default function Reservation() {
       ? formatPickupWindow(pickupWindowStart, pickupWindowEnd)
       : `時間指定なし${itemHoursLabel ? `（営業時間 ${itemHoursLabel}）` : ""}`;
 
-  const summaryRows = [
+  const pickupSummaryRows = [
     { label: "受取地点", value: pickupPlace },
     // 体験は受取時間帯ではなく希望日時で予約する。
     ...(item.requiresDate ? [] : [{ label: "受取時間帯", value: pickupWindowLabel }]),
+  ];
+  const summaryRows = [
+    ...pickupSummaryRows,
     { label: "金額", value: formatYen(item.price), emphasis: true },
   ];
+  const shopName = getShopName(item.shopId);
 
   const formErrorNode = formError && (
     <p className="mb-2 text-sm text-red-600" role="alert">
@@ -510,15 +519,38 @@ export default function Reservation() {
         </button>
         <h1 className="text-xl font-bold">予約内容の入力</h1>
 
-        <section className="mt-3 rounded-xl bg-white p-4 shadow-sm">
-          <p className="text-lg font-semibold">{item.name}</p>
-          <dl className="mt-2 space-y-2 text-sm">
-            {summaryRows.map((row) => (
+        <section className="mt-3 overflow-hidden rounded-xl bg-white shadow-sm">
+          <div className="flex items-start gap-3 p-4">
+            <ItemThumbnail itemId={item.id} title={item.name} size="large" />
+            <div className="flex min-h-28 min-w-0 flex-1 flex-col">
+              <h2 className="line-clamp-2 break-words text-base font-bold leading-snug">
+                {item.name}
+              </h2>
+              <p className="mt-1 break-words text-xs text-gray-600">
+                提供：{shopName || "提供元情報なし"}
+              </p>
+              <p className="mt-auto pt-2 text-right text-xl font-bold text-[#16381b]">
+                {formatYen(item.price)}
+              </p>
+            </div>
+          </div>
+          {(item.description || item.contentAmount) && (
+            <div className="px-4 pb-4">
+              {item.description && (
+                <p className="line-clamp-3 break-words text-sm leading-relaxed text-gray-700">
+                  {item.description}
+                </p>
+              )}
+              {item.contentAmount && (
+                <p className="mt-1 text-xs text-gray-500">内容量：{item.contentAmount}</p>
+              )}
+            </div>
+          )}
+          <dl className="space-y-2 border-t border-gray-100 bg-gray-50 px-4 py-3 text-sm">
+            {pickupSummaryRows.map((row) => (
               <div key={row.label} className="flex justify-between gap-3">
                 <dt className="shrink-0 text-gray-500">{row.label}</dt>
-                <dd className={`text-right ${row.emphasis ? "text-lg font-bold" : "font-medium"}`}>
-                  {row.value}
-                </dd>
+                <dd className="break-words text-right font-medium">{row.value}</dd>
               </div>
             ))}
           </dl>
