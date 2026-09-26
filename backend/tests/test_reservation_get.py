@@ -26,11 +26,14 @@ class FakeQueryResult:
 
 
 class FakeTable:
-    def __init__(self, rows):
+    def __init__(self, rows, items):
         self.rows = rows
+        self.items = items
         self._filters = []
+        self._fields = ""
 
-    def select(self, _fields):
+    def select(self, fields):
+        self._fields = fields
         return self
 
     def eq(self, field, value):
@@ -46,16 +49,34 @@ class FakeTable:
             for r in self.rows.values()
             if all(str(r.get(field)) == str(value) for field, value in self._filters)
         ]
+        if "item:items(" in self._fields:
+            matches = [
+                {
+                    **row,
+                    "item": {
+                        key: self.items[row["item_id"]].get(key)
+                        for key in (
+                            "id",
+                            "title",
+                            "location_name",
+                            "pickup_available_from",
+                            "pickup_available_to",
+                        )
+                    },
+                }
+                for row in matches
+            ]
         return FakeQueryResult(matches)
 
 
 class FakeSupabase:
-    def __init__(self, reservations):
+    def __init__(self, reservations, items):
         self.reservations = reservations
+        self.items = items
 
     def table(self, name):
         if name == "reservations":
-            return FakeTable(self.reservations)
+            return FakeTable(self.reservations, self.items)
         raise NotImplementedError(name)
 
 
@@ -85,7 +106,19 @@ def client():
 
 @pytest.fixture
 def fake_supabase(monkeypatch):
-    fake = FakeSupabase({})
+    fake = FakeSupabase(
+        {},
+        {
+            "11111111-1111-4111-8111-111111111111": {
+                "id": "11111111-1111-4111-8111-111111111111",
+                "title": "間伐材の薪（未加工）",
+                "location_name": "道の駅 ロック・ガーデンひちそう",
+                "pickup_available_from": "09:00:00",
+                "pickup_available_to": "18:00:00",
+                "is_active": True,
+            }
+        },
+    )
     monkeypatch.setattr(main, "get_supabase", lambda: fake)
     return fake
 
@@ -104,6 +137,23 @@ class TestGetReservation:
 
         assert response.status_code == 200
         assert response.json()["id"] == reservation["id"]
+        assert response.json()["item"]["title"] == "間伐材の薪（未加工）"
+
+    def test_inactive_reserved_item_is_returned(self, client, fake_supabase):
+        reservation = make_reservation()
+        fake_supabase.reservations[reservation["id"]] = reservation
+        fake_supabase.items[reservation["item_id"]]["is_active"] = False
+
+        response = get(client, reservation["id"], reservation["access_token"])
+
+        assert response.status_code == 200
+        assert response.json()["item"] == {
+            "id": reservation["item_id"],
+            "title": "間伐材の薪（未加工）",
+            "location_name": "道の駅 ロック・ガーデンひちそう",
+            "pickup_available_from": "09:00:00",
+            "pickup_available_to": "18:00:00",
+        }
 
     def test_missing_token_returns_404(self, client, fake_supabase):
         reservation = make_reservation()

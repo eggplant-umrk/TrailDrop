@@ -53,6 +53,13 @@ describe("getReservation error contract (DEMO_MODE matches the real API)", () =>
 
     expect(fetched.id).toBe(created.id);
     expect(fetched).not.toHaveProperty("access_token");
+    expect(fetched.item).toEqual({
+      id: "wood-001",
+      title: "間伐材の薪（小）",
+      location_name: "道の駅 ロック・ガーデンひちそう",
+      pickup_available_from: "07:00:00",
+      pickup_available_to: "21:00:00",
+    });
   });
 
   it.each([

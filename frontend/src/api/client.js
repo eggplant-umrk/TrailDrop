@@ -246,7 +246,22 @@ export async function getReservation(reservationId, reservationToken) {
         throw err;
       }
       const { access_token: _accessToken, ...response } = res;
-      return response;
+      // 実Backendの予約照会レスポンスと同じ形にする。DEMO_MODEの商品内容
+      // 自体は変更せず、予約完了画面がGET /itemsへ再問い合わせしなくても
+      // 表示できる最小フィールドだけを予約へ添付する。
+      const found = demoGetItems().find((item) => String(item.id) === String(res.item_id));
+      return {
+        ...response,
+        item: found
+          ? {
+              id: found.id,
+              title: found.title,
+              location_name: found.location_name,
+              pickup_available_from: found.pickup_available_from,
+              pickup_available_to: found.pickup_available_to,
+            }
+          : null,
+      };
     } catch (e) {
       if (e && typeof e.status === "number") throw e;
       const err = new Error("Failed to load reservation");

@@ -60,7 +60,7 @@ class FakeSupabase:
     """
 
     def __init__(self, items):
-        self.items = items  # dict[str, dict] (id -> {"type": ..., "stock": ...})
+        self.items = items  # dict[str, dict] (id -> type/stock/is_active)
         self.reservations = {}
         self.rpc_call_count = 0
 
@@ -77,7 +77,7 @@ class FakeSupabase:
 
         item_id = params["p_item_id"]
         item = self.items.get(item_id)
-        if item is None:
+        if item is None or not item["is_active"]:
             raise FakePostgrestError("ITEM_NOT_FOUND", "P0002")
         if item["stock"] <= 0:
             raise FakePostgrestError("OUT_OF_STOCK", "P0001")
@@ -111,7 +111,7 @@ class FakeSupabase:
 
 
 def make_item(**overrides):
-    data = {"type": "pickup", "stock": 5}
+    data = {"type": "pickup", "stock": 5, "is_active": True}
     data.update(overrides)
     return data
 
@@ -192,6 +192,20 @@ class TestCreateReservationPayment:
         response = create(client, payment_method="paypay")
 
         assert response.status_code == 409
+        assert fake_supabase.reservations == {}
+
+    def test_inactive_item_returns_404_without_changing_stock(
+        self, client, fake_supabase
+    ):
+        item = fake_supabase.items["11111111-1111-4111-8111-111111111111"]
+        item["is_active"] = False
+        stock_before = item["stock"]
+
+        response = create(client, payment_method="paypay")
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Item not found"
+        assert item["stock"] == stock_before
         assert fake_supabase.reservations == {}
 
     def test_repeated_identical_requests_each_create_their_own_reservation(
