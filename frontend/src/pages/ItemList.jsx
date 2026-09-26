@@ -10,7 +10,6 @@ import {
 } from "../components/ui";
 import ItemThumbnail from "../components/ItemThumbnail";
 import { toUserMessage } from "../utils/errorMessages";
-import { formatPickupHours } from "../utils/pickupHours";
 import { getShopName } from "../utils/shopNames";
 
 export function mapItem(serverItem) {
@@ -21,8 +20,6 @@ export function mapItem(serverItem) {
     price: serverItem.price,
     stock: serverItem.stock,
     location_name: serverItem.location_name,
-    pickup_available_from: serverItem.pickup_available_from,
-    pickup_available_to: serverItem.pickup_available_to,
     shop_id: serverItem.shop_id,
     description: serverItem.description,
     category: serverItem.category,
@@ -132,17 +129,7 @@ export default function ItemList() {
 
               <div className="mt-3 space-y-1 rounded-lg bg-gray-50 p-3 text-xs text-gray-600">
                 <p className="break-words">受取場所：{it.location_name}</p>
-                {/* 商品自体の営業時間(RouteTest.jsx/StaffVerify.jsxと同じ表示)。
-                    未設定の商品では表示しない。 */}
-                {it.pickup_available_from && it.pickup_available_to && (
-                  <p>
-                    受取可能時間：{" "}
-                    <span className="whitespace-nowrap">
-                      {formatPickupHours(it.pickup_available_from)}〜
-                      {formatPickupHours(it.pickup_available_to)}
-                    </span>
-                  </p>
-                )}
+                <p>受取可能時間：24時間（無人ロッカー）</p>
               </div>
 
               {it.stock > 0 ? (

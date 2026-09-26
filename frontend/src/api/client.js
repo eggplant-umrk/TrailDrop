@@ -24,10 +24,14 @@ function errorMessage(json, status) {
   if (typeof detail === "string") return detail;
 
   if (Array.isArray(detail)) {
-    const hasRequestedAtError = detail.some(
-      (entry) => Array.isArray(entry?.loc) && entry.loc.includes("requested_at"),
-    );
-    return hasRequestedAtError
+    const hasErrorAt = (field) =>
+      detail.some((entry) => Array.isArray(entry?.loc) && entry.loc.includes(field));
+    // ルート分析の出発日時が過去になった場合(画面を開いたまま時間が経った等)。
+    // 「入力内容が正しくありません」だけでは原因が分からないため個別の文言にする。
+    if (hasErrorAt("departure_at")) {
+      return "出発日時が現在より前になっています。現在より後の日時を指定してください。";
+    }
+    return hasErrorAt("requested_at")
       ? "入力された日時が正しくありません。"
       : "入力内容が正しくありません。";
   }
@@ -97,10 +101,11 @@ async function request(path, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
   return json;
 }
 
-// DEMO_MODEの商品。受取可能時間(営業時間)は07:00〜21:00にそろえ、発表・
-// デモの時刻によって「今すぐ」の検索結果が0件にならないようにする
-// (判定ロジックは本番と同じまま、データだけの調整)。
-function demoGetItems() {
+// DEMO_MODEの商品。受取場所は無人ロッカーのため、受取は24時間可能
+// (営業時間は持たない。pickup_available_from/toは本番DBと同じくnull)。
+// stockは初期在庫で、実際の在庫はdemoItemsWithStock()でDEMO予約の分を
+// 差し引いて返す。
+function demoBaseItems() {
   return [
     {
       id: "a1111111-1111-4111-8111-111111111111",
@@ -117,8 +122,8 @@ function demoGetItems() {
       price_note: "デモ用設定価格。提供者の販売価格ではありません。",
       is_active: true,
       location_name: "道の駅 ロック・ガーデンひちそう",
-      pickup_available_from: "07:00:00",
-      pickup_available_to: "21:00:00",
+      pickup_available_from: null,
+      pickup_available_to: null,
     },
     {
       id: "a2222222-2222-4222-8222-222222222222",
@@ -135,8 +140,8 @@ function demoGetItems() {
       price_note: "デモ用設定価格。提供者の販売価格ではありません。",
       is_active: true,
       location_name: "道の駅 ロック・ガーデンひちそう",
-      pickup_available_from: "07:00:00",
-      pickup_available_to: "21:00:00",
+      pickup_available_from: null,
+      pickup_available_to: null,
     },
     {
       id: "a3333333-3333-4333-8333-333333333333",
@@ -153,8 +158,8 @@ function demoGetItems() {
       price_note: "デモ用設定価格。提供者の販売価格ではありません。",
       is_active: true,
       location_name: "道の駅 ロック・ガーデンひちそう",
-      pickup_available_from: "07:00:00",
-      pickup_available_to: "21:00:00",
+      pickup_available_from: null,
+      pickup_available_to: null,
     },
     {
       id: "a4444444-4444-4444-8444-444444444444",
@@ -171,8 +176,8 @@ function demoGetItems() {
       price_note: "デモ用設定価格。提供者の販売価格ではありません。",
       is_active: true,
       location_name: "道の駅 ロック・ガーデンひちそう",
-      pickup_available_from: "07:00:00",
-      pickup_available_to: "21:00:00",
+      pickup_available_from: null,
+      pickup_available_to: null,
     },
     {
       id: "a5555555-5555-4555-8555-555555555555",
@@ -189,16 +194,48 @@ function demoGetItems() {
       price_note: "デモ用設定価格。提供者の販売価格ではありません。",
       is_active: true,
       location_name: "道の駅 ロック・ガーデンひちそう",
-      pickup_available_from: "07:00:00",
-      pickup_available_to: "21:00:00",
+      pickup_available_from: null,
+      pickup_available_to: null,
     },
   ];
+}
+
+// DEMO_MODEの予約データ。localStorageに保存し、同じ端末・同じブラウザなら
+// 別タブ(予約完了画面の再表示・/staff/verify)からも同じ予約を参照できる
+// ようにする。localStorageはブラウザごとの保存領域のため、別端末・別
+// ブラウザ間では共有できない(本番のBackendを使う場合だけ共有される)。
+export const DEMO_RESERVATIONS_KEY = "traildrop_demo_reservations";
+
+function readDemoReservations() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(DEMO_RESERVATIONS_KEY) || "{}");
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeDemoReservations(map) {
+  localStorage.setItem(DEMO_RESERVATIONS_KEY, JSON.stringify(map));
+}
+
+// DEMO予約で確保した在庫を差し引いた商品一覧。本番のRPCと同じく、予約
+// (pending)・受取済み(completed)は在庫を使い、キャンセル(cancelled)は
+// 在庫を戻す。予約データから毎回計算するため、別タブでも同じ在庫になる。
+function demoItemsWithStock() {
+  const reservations = Object.values(readDemoReservations());
+  return demoBaseItems().map((item) => {
+    const used = reservations.filter(
+      (res) => String(res.item_id) === String(item.id) && res.status !== "cancelled",
+    ).length;
+    return { ...item, stock: Math.max(0, item.stock - used) };
+  });
 }
 
 export async function getItems() {
   if (DEMO_MODE) {
     await new Promise((r) => setTimeout(r, 200));
-    return demoGetItems();
+    return demoItemsWithStock();
   }
   return await request(`/items`, { method: "GET" });
 }
@@ -223,7 +260,25 @@ export async function createReservation({
   }
 
   if (DEMO_MODE) {
-    // Demo mode: persist reservations in sessionStorage so they survive reloads
+    // 本番のcreate_reservation_with_stock RPCと同じく、商品が無ければ404、
+    // 在庫が無ければ409にする。在庫はDEMO予約の分だけ減る。
+    const target = demoItemsWithStock().find((item) => String(item.id) === String(item_id));
+    if (!target) {
+      const err = new Error("Item not found");
+      err.status = 404;
+      throw err;
+    }
+    if (!(target.stock > 0)) {
+      const err = new Error("Item is out of stock");
+      err.status = 409;
+      throw err;
+    }
+    // 本番(models.py)と同じく、終了済みの受取時間帯では予約できない。
+    if (pickup_window_end && new Date(pickup_window_end).getTime() <= Date.now()) {
+      const err = new Error("Pickup window is invalid");
+      err.status = 422;
+      throw err;
+    }
     const now = new Date().toISOString();
     const id = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `demo-${Date.now()}`;
     const qr = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `qr-${Date.now()}`;
@@ -246,10 +301,9 @@ export async function createReservation({
     };
 
     try {
-      const raw = sessionStorage.getItem("demo_reservations") || "{}";
-      const map = JSON.parse(raw);
+      const map = readDemoReservations();
       map[id] = reservation;
-      sessionStorage.setItem("demo_reservations", JSON.stringify(map));
+      writeDemoReservations(map);
     } catch (e) {
       // ignore storage errors in demo mode
     }
@@ -274,8 +328,7 @@ export async function getReservation(reservationId, reservationToken) {
   if (DEMO_MODE) {
     // Demo mode: load persisted reservation created via createReservation
     try {
-      const raw = sessionStorage.getItem("demo_reservations") || "{}";
-      const map = JSON.parse(raw);
+      const map = readDemoReservations();
       const res = map[reservationId];
       if (!res) {
         const err = new Error("Reservation not found");
@@ -296,7 +349,7 @@ export async function getReservation(reservationId, reservationToken) {
       // 実Backendの予約照会レスポンスと同じ形にする。DEMO_MODEの商品内容
       // 自体は変更せず、予約完了画面がGET /itemsへ再問い合わせしなくても
       // 表示できる最小フィールドだけを予約へ添付する。
-      const found = demoGetItems().find((item) => String(item.id) === String(res.item_id));
+      const found = demoBaseItems().find((item) => String(item.id) === String(res.item_id));
       return {
         ...response,
         item: found
@@ -334,12 +387,10 @@ export async function cancelReservation(reservationId, reservationToken) {
     // status codes. A missing/mismatched token and an unknown id both
     // return 404 (not 401) so the id's existence can't be probed, matching
     // getReservation()'s access-token check and the Backend's cancel RPC.
-    // There is no stock to return here: demo items always come from the
-    // static demoGetItems() list, which createReservation() never
-    // decrements either.
+    // Stock comes back automatically: demoItemsWithStock() does not count
+    // cancelled reservations.
     try {
-      const raw = sessionStorage.getItem("demo_reservations") || "{}";
-      const map = JSON.parse(raw);
+      const map = readDemoReservations();
       const res = map[reservationId];
       if (!res || !reservationToken || res.access_token !== reservationToken) {
         const err = new Error("Reservation not found");
@@ -358,7 +409,7 @@ export async function cancelReservation(reservationId, reservationToken) {
         res.payment_status = "cancelled";
       }
       map[reservationId] = res;
-      sessionStorage.setItem("demo_reservations", JSON.stringify(map));
+      writeDemoReservations(map);
       const { access_token: _accessToken, ...response } = res;
       return response;
     } catch (e) {
@@ -417,8 +468,7 @@ export async function verifyQr(qrToken, staffToken) {
       throw err;
     }
     try {
-      const raw = sessionStorage.getItem("demo_reservations") || "{}";
-      const map = JSON.parse(raw);
+      const map = readDemoReservations();
       const entry = Object.values(map).find((res) => res.qr_token === qrToken);
       if (!entry) {
         const err = new Error("QR token not found");
@@ -442,7 +492,7 @@ export async function verifyQr(qrToken, staffToken) {
       }
       entry.status = "completed";
       map[entry.id] = entry;
-      sessionStorage.setItem("demo_reservations", JSON.stringify(map));
+      writeDemoReservations(map);
       const { access_token: _accessToken, ...response } = entry;
       return response;
     } catch (e) {
@@ -476,8 +526,7 @@ export async function getStaffReservation(reservationId, staffToken) {
       throw err;
     }
     try {
-      const raw = sessionStorage.getItem("demo_reservations") || "{}";
-      const map = JSON.parse(raw);
+      const map = readDemoReservations();
       const entry = map[reservationId];
       if (!entry) {
         const err = new Error("Reservation not found");
@@ -534,8 +583,7 @@ export async function searchStaffReservations(userName, staffToken) {
       throw err;
     }
     try {
-      const raw = sessionStorage.getItem("demo_reservations") || "{}";
-      const map = JSON.parse(raw);
+      const map = readDemoReservations();
       const items = await getItems();
       const needle = trimmed.toLowerCase();
       return Object.values(map)

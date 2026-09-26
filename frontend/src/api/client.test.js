@@ -29,6 +29,7 @@ function jsonResponse(status, body) {
 
 beforeEach(() => {
   sessionStorage.clear();
+  localStorage.clear();
 });
 
 afterEach(() => {
@@ -57,8 +58,8 @@ describe("getReservation error contract (DEMO_MODE matches the real API)", () =>
       id: "a1111111-1111-4111-8111-111111111111",
       title: "鮎の甘露煮の燻製 100gパック",
       location_name: "道の駅 ロック・ガーデンひちそう",
-      pickup_available_from: "07:00:00",
-      pickup_available_to: "21:00:00",
+      pickup_available_from: null,
+      pickup_available_to: null,
     });
   });
 
@@ -116,8 +117,9 @@ describe("DEMO_MODE product master", () => {
     ]);
     expect(items.every((item) => item.type === "pickup")).toBe(true);
     expect(items.every((item) => item.is_active === true)).toBe(true);
-    expect(items.every((item) => item.pickup_available_from === "07:00:00")).toBe(true);
-    expect(items.every((item) => item.pickup_available_to === "21:00:00")).toBe(true);
+    // 無人ロッカーのため24時間受取。営業時間は持たない。
+    expect(items.every((item) => item.pickup_available_from === null)).toBe(true);
+    expect(items.every((item) => item.pickup_available_to === null)).toBe(true);
     expect(items.map((item) => item.title)).toEqual([
       "鮎の甘露煮の燻製 100gパック",
       "若鶏の皮肝けいちゃん 200g×2袋",
@@ -125,6 +127,84 @@ describe("DEMO_MODE product master", () => {
       "出来立てくんたま（3個入×5袋）通常パック",
       "菊泉本舗 特選 お茶せんべい 26枚入り",
     ]);
+  });
+});
+
+describe("DEMO_MODE reservations are shared across tabs of the same browser (P1-3)", () => {
+  const ITEM = "a1111111-1111-4111-8111-111111111111";
+
+  // 別タブ = sessionStorageは空、モジュールも読み込み直し、localStorageだけ共有。
+  async function openAnotherTab() {
+    sessionStorage.clear();
+    return loadClient({ VITE_DEMO_MODE: "true", VITE_API_BASE_URL: "" });
+  }
+
+  it("a reservation made in one tab can be re-displayed in another tab", async () => {
+    const tab1 = await loadClient({ VITE_DEMO_MODE: "true", VITE_API_BASE_URL: "" });
+    const created = await tab1.createReservation({ item_id: ITEM, user_name: "テスト太郎", payment_method: "paypay" });
+
+    const tab2 = await openAnotherTab();
+    const fetched = await tab2.getReservation(created.id, created.access_token);
+
+    expect(fetched.id).toBe(created.id);
+    expect(fetched.qr_token).toBe(created.qr_token);
+  });
+
+  it("/staff/verify in another tab can look up and complete the same reservation", async () => {
+    const tab1 = await loadClient({ VITE_DEMO_MODE: "true", VITE_API_BASE_URL: "" });
+    const created = await tab1.createReservation({ item_id: ITEM, user_name: "テスト太郎", payment_method: "paypay" });
+
+    const staffTab = await openAnotherTab();
+    const staffView = await staffTab.getStaffReservation(created.id, "staff");
+    expect(staffView.status).toBe("pending");
+    const verified = await staffTab.verifyQr(created.qr_token, "staff");
+    expect(verified.status).toBe("completed");
+
+    const customerTab = await openAnotherTab();
+    const after = await customerTab.getReservation(created.id, created.access_token);
+    expect(after.status).toBe("completed");
+  });
+});
+
+describe("DEMO_MODE stock decreases when reserving (P2-10)", () => {
+  const FIREWOOD = "a3333333-3333-4333-8333-333333333333"; // 初期在庫2
+
+  async function stockOf(api, id) {
+    return (await api.getItems()).find((item) => item.id === id).stock;
+  }
+
+  it("each reservation uses one unit, and the last one is rejected as out of stock", async () => {
+    const api = await loadClient({ VITE_DEMO_MODE: "true", VITE_API_BASE_URL: "" });
+    const reserve = () => api.createReservation({ item_id: FIREWOOD, user_name: "テスト", payment_method: "paypay" });
+
+    expect(await stockOf(api, FIREWOOD)).toBe(2);
+    await reserve();
+    expect(await stockOf(api, FIREWOOD)).toBe(1);
+    const second = await reserve();
+    expect(await stockOf(api, FIREWOOD)).toBe(0);
+
+    const error = await rejectionOf(reserve());
+    expect(error.status).toBe(409);
+    expect(error.message).toBe("Item is out of stock");
+
+    // キャンセルすると在庫が戻る(本番のRPCと同じ)。
+    await api.cancelReservation(second.id, second.access_token);
+    expect(await stockOf(api, FIREWOOD)).toBe(1);
+  });
+
+  it("rejects a reservation whose pickup window has already ended", async () => {
+    const api = await loadClient({ VITE_DEMO_MODE: "true", VITE_API_BASE_URL: "" });
+    const error = await rejectionOf(
+      api.createReservation({
+        item_id: FIREWOOD,
+        user_name: "テスト",
+        payment_method: "paypay",
+        pickup_window_start: new Date(Date.now() - 3 * 3600000).toISOString(),
+        pickup_window_end: new Date(Date.now() - 3600000).toISOString(),
+      }),
+    );
+    expect(error.status).toBe(422);
+    expect(await stockOf(api, FIREWOOD)).toBe(2);
   });
 });
 
@@ -235,6 +315,27 @@ describe("analyzeRoute pickup candidates", () => {
 });
 
 describe("request() error objects", () => {
+  it("explains a past departure_at instead of a generic input error (P2-12)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse(422, {
+          detail: [{ loc: ["body", "departure_at"], msg: "Value error, departure_at must be in the future" }],
+        }),
+      ),
+    );
+    const api = await loadClient({ VITE_DEMO_MODE: "false", VITE_API_BASE_URL: "http://api.test" });
+
+    const error = await rejectionOf(
+      api.analyzeRoute({ origin: "名古屋駅", destination: "下呂温泉", departure_at: "2020-01-01T09:00:00+09:00" }),
+    );
+
+    expect(error.status).toBe(422);
+    expect(toUserMessage(error)).toBe(
+      "出発日時が現在より前になっています。現在より後の日時を指定してください。",
+    );
+  });
+
   it("marks FastAPI validation errors (array detail) as already-localized", async () => {
     vi.stubGlobal(
       "fetch",

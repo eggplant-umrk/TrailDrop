@@ -5,7 +5,6 @@ import { saveAccessToken } from "../utils/reservationAccess";
 import { saveRouteContext } from "../utils/routeContext";
 import { isPickupWindowEnded, msUntilPickupWindowEnds } from "../utils/pickupWindow";
 import { toUserMessage } from "../utils/errorMessages";
-import { formatPickupHours } from "../utils/pickupHours";
 import { getShopName } from "../utils/shopNames";
 import ItemThumbnail from "../components/ItemThumbnail";
 import {
@@ -216,8 +215,6 @@ export default function Reservation() {
             shopId: found.shop_id,
             description: found.description,
             contentAmount: found.content_amount,
-            pickupAvailableFrom: found.pickup_available_from,
-            pickupAvailableTo: found.pickup_available_to,
           });
         }
       } catch (e) {
@@ -341,6 +338,9 @@ export default function Reservation() {
     saveDraft(id, { name, date, paymentMethod });
     navigate(`/reserve/${id}/confirm`, {
       state: {
+        // 入力画面から進んだ確認画面か(「入力内容を修正する」で履歴を1つ
+        // 戻るだけで入力画面に戻れるかの判定用)。
+        fromInputStep: true,
         name,
         date,
         paymentMethod,
@@ -459,16 +459,13 @@ export default function Reservation() {
 
   // 受取地点はRouteTestで選んだ地点を優先し、無ければ商品の受取場所。
   const pickupPlace = routePassPoint || item.location;
-  const itemHoursLabel =
-    item.pickupAvailableFrom && item.pickupAvailableTo
-      ? `${formatPickupHours(item.pickupAvailableFrom)}〜${formatPickupHours(item.pickupAvailableTo)}`
-      : null;
   // RouteTestで受取時間帯を選択してきた場合のみ時間帯を表示する。選択して
   // いない場合(商品一覧から直接来た等)は「時間指定なし」とし、推測で補わない。
+  // 受取場所は無人ロッカーのため、時間指定なしでも24時間受け取れる。
   const pickupWindowLabel =
     pickupWindowStart && pickupWindowEnd
       ? formatPickupWindow(pickupWindowStart, pickupWindowEnd)
-      : `時間指定なし${itemHoursLabel ? `（営業時間 ${itemHoursLabel}）` : ""}`;
+      : "時間指定なし（24時間受取可）";
 
   const pickupSummaryRows = [
     { label: "受取地点", value: pickupPlace },
@@ -486,6 +483,32 @@ export default function Reservation() {
       {formError}
     </p>
   );
+
+  // 「入力内容を修正する」: 入力画面から進んできた確認画面なら、履歴を1つ戻る
+  // (ブラウザの戻ると同じ)。以前は確認画面の履歴を入力画面で置き換えていた
+  // ため、履歴に入力画面が2つ並び、「‹ 商品に戻る」を2回押さないと検索結果に
+  // 戻れなかった。入力内容はdraft(sessionStorage)から復元される。
+  // 直接開いた確認画面など戻り先が無い場合は、従来どおり入力画面で置き換える
+  // (pushすると入力内容を持った確認画面の履歴が残り、予約完了後の戻る操作で
+  // 確認画面へ戻って二重予約できてしまうため)。
+  function handleEditInput() {
+    if (location.state?.fromInputStep && (window.history.state?.idx ?? 0) > 0) {
+      navigate(-1);
+      return;
+    }
+    navigate(`/reserve/${id}`, {
+      replace: true,
+      state: {
+        origin: routeOrigin,
+        destination: routeDestination,
+        passPoint: routePassPoint,
+        passPointLat: routePassPointLat,
+        passPointLng: routePassPointLng,
+        pickupWindowStart,
+        pickupWindowEnd,
+      },
+    });
+  }
 
   // 「‹ 商品に戻る」: 履歴があればブラウザの戻ると同じ動き(検索結果の状態を
   // 保ったまま戻る)。直接開いた場合など履歴が無ければ、来た経路の一覧へ。
@@ -695,23 +718,7 @@ export default function Reservation() {
 
       <button
         type="button"
-        // 確認画面の履歴を入力画面で置き換える(replace)。pushすると
-        // 入力内容を持った確認画面の履歴が残り、予約完了後にブラウザの
-        // 戻る操作でその確認画面へ戻って二重予約できてしまうため。
-        onClick={() =>
-          navigate(`/reserve/${id}`, {
-            replace: true,
-            state: {
-              origin: routeOrigin,
-              destination: routeDestination,
-              passPoint: routePassPoint,
-              passPointLat: routePassPointLat,
-              passPointLng: routePassPointLng,
-              pickupWindowStart,
-              pickupWindowEnd,
-            },
-          })
-        }
+        onClick={handleEditInput}
         disabled={submitting}
         className={`${secondaryButtonClass} mt-4`}
       >
