@@ -91,7 +91,7 @@ async function createDetector() {
   return createJsQrDetector();
 }
 
-export default function QrScanner({ onDetected, onCancel }) {
+export default function QrScanner({ onDetected, onCancel, showManualEntryHint = true }) {
   const videoRef = useRef(null);
   const [status, setStatus] = useState("starting"); // starting | scanning | error
   const [errorMessage, setErrorMessage] = useState("");
@@ -203,9 +203,11 @@ export default function QrScanner({ onDetected, onCancel }) {
       {status === "error" ? (
         <p className="text-sm text-red-600" role="alert">
           {errorMessage}
-          <span className="mt-1 block text-gray-600">
-            下のQRトークン欄に手入力して受取確認できます。
-          </span>
+          {showManualEntryHint && (
+            <span className="mt-1 block text-gray-600">
+              下のQRトークン欄に手入力して受取確認できます。
+            </span>
+          )}
         </p>
       ) : (
         <>

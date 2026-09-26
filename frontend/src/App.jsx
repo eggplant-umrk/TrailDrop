@@ -3,6 +3,7 @@ import ItemList from "./pages/ItemList";
 import Reservation from "./pages/Reservation";
 import ReservationComplete from "./pages/ReservationComplete";
 import RouteTest from "./pages/RouteTest";
+import StaffScan from "./pages/StaffScan";
 import StaffVerify from "./pages/StaffVerify";
 
 function App() {
@@ -17,6 +18,7 @@ function App() {
         <Route path="/reserve/:id/confirm" element={<Reservation />} />
         <Route path="/complete/:id" element={<ReservationComplete />} />
         <Route path="/route-test" element={<RouteTest />} />
+        <Route path="/staff/scan" element={<StaffScan />} />
         <Route path="/staff/verify" element={<StaffVerify />} />
       </Routes>
     </BrowserRouter>
