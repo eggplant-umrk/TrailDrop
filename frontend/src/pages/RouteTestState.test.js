@@ -45,4 +45,55 @@ describe("RouteTest state persistence", () => {
   it("returns null when nothing has been saved", () => {
     expect(loadRouteTestState()).toBeNull();
   });
+
+  it("restores a current-location search without the previously typed origin (P2-4)", () => {
+    saveRouteTestState({
+      origin: "名古屋駅",
+      useCurrentOrigin: true,
+      destination: "下呂温泉",
+      departureMode: "custom",
+      result: { origin: "現在地", destination: "下呂温泉" },
+    });
+
+    const restored = loadRouteTestState();
+
+    expect(restored.useCurrentOrigin).toBe(true);
+    expect(restored.origin).toBe("");
+    expect(restored.result.origin).toBe("現在地");
+  });
+
+  it("treats an old-format saved current-location result as a current-location search", () => {
+    saveRouteTestState({
+      origin: "名古屋駅",
+      destination: "下呂温泉",
+      departureMode: "custom",
+      result: { origin: "現在地", destination: "下呂温泉" },
+    });
+
+    const restored = loadRouteTestState();
+
+    expect(restored.useCurrentOrigin).toBe(true);
+    expect(restored.origin).toBe("");
+  });
+
+  it("drops a 'now' result older than 10 minutes but keeps the inputs (P2-7)", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+    saveRouteTestState({
+      origin: "名古屋駅",
+      destination: "下呂温泉",
+      departureMode: "now",
+      searchedDepartureMode: "now",
+      searchedAtMs: Date.now(),
+      searchedKey: "k",
+      result: { pass_point: "道の駅 ロック・ガーデンひちそう" },
+    });
+
+    vi.setSystemTime(new Date("2026-01-01T00:11:00Z"));
+    const restored = loadRouteTestState();
+
+    expect(restored.result).toBeNull();
+    expect(restored.origin).toBe("名古屋駅");
+    expect(restored.destination).toBe("下呂温泉");
+  });
 });

@@ -19,22 +19,20 @@ import {
   selectPickupCandidate,
 } from "../utils/pickupCandidates";
 import {
-  findWindowOffsetForItem,
-  hasPickupHours,
-  isItemAvailableAt,
-  jstMinutesSinceMidnight,
+  WINDOW_OFFSET_MAX_MINUTES,
+  WINDOW_OFFSET_MIN_MINUTES,
+  WINDOW_OFFSET_STEP_MINUTES,
+  clampWindowOffset,
+  classifyItemsForWindow,
+  isDepartureInputInFuture,
   nowDepartureInputValue,
-  suggestDepartureForItem,
+  pickupWindowAt,
 } from "../utils/pickupHours";
-
-// 受取可能時間まわりの判定はutils/pickupHours.jsへ移した。既存のテスト・
-// 呼び出し元のためにここからも公開する。
-export {
-  formatPickupHours,
-  isItemAvailableAt,
-  jstMinutesSinceMidnight,
-  parseTimeStringToMinutes,
-} from "../utils/pickupHours";
+import {
+  buildSearchKey,
+  resultBookingState,
+  sanitizeRestoredRouteState,
+} from "../utils/routeSearch";
 
 // 「現在地を使う」選択中は出発地としてCURRENT_LOCATION_LABEL(表示用ラベル、
 // utils/googleMaps.js)を送り、実際の出発地はorigin_location(座標)として
@@ -52,24 +50,35 @@ const ROUTE_ANALYSIS_ERROR_BY_STATUS = {
 };
 const ROUTE_ANALYSIS_ERROR_FALLBACK = "ルートの検索に失敗しました。";
 const ITEMS_LOAD_ERROR_FALLBACK = "商品情報の取得に失敗しました。";
+export const DEPARTURE_IN_PAST_MESSAGE =
+  "出発日時が現在より前になっています。現在より後の日時を指定してください。";
 
 // RouteTestの入力・分析結果をlocalStorageに保存し、Reservationからの戻る
 // 操作・リロード・別タブでも再実行(Google Routes APIの再呼び出し)無しで
 // 復元できるようにする(一括修正m7・U6)。TTLを設け、古い分析結果を無期限に
-// 使い続けないようにする。
+// 使い続けないようにする。「今すぐ」で検索した結果はさらに短い時間で
+// 破棄する(utils/routeSearch.jsのNOW_RESULT_MAX_AGE_MS)。
 const ROUTE_TEST_STATE_KEY = "traildrop_route_test_state";
 const ROUTE_TEST_STATE_TTL_MS = 20 * 60 * 1000; // 20分
 
-export function loadRouteTestState() {
+// 受取時間帯の終了・「今すぐ」の結果の古さを、画面を開いたままでも
+// 判定し直す間隔。
+const CLOCK_TICK_MS = 15 * 1000;
+
+export function loadRouteTestState(nowMs = Date.now()) {
   try {
     const raw = localStorage.getItem(ROUTE_TEST_STATE_KEY);
     if (!raw) return null;
     const state = JSON.parse(raw);
-    if (!state?.savedAt || Date.now() - state.savedAt > ROUTE_TEST_STATE_TTL_MS) {
+    if (!state?.savedAt || nowMs - state.savedAt > ROUTE_TEST_STATE_TTL_MS) {
       localStorage.removeItem(ROUTE_TEST_STATE_KEY);
       return null;
     }
-    return state;
+    // 旧形式(useCurrentOriginが無い)で「現在地」から検索した結果も、
+    // 現在地の検索として扱う。
+    const useCurrentOrigin =
+      Boolean(state.useCurrentOrigin) || state.result?.origin === CURRENT_LOCATION_LABEL;
+    return sanitizeRestoredRouteState({ ...state, useCurrentOrigin }, nowMs);
   } catch {
     return null;
   }
@@ -103,21 +112,6 @@ function formatJapanDay(date) {
     weekday: "short",
   }).format(date);
 }
-
-// datetime-localの値(JST)を「9月27日(日) 09:00」の形で表示する。
-function formatDepartureInputValue(value) {
-  const date = new Date(`${value}:00+09:00`);
-  return `${formatJapanDay(date)} ${formatJapanTime(date)}`;
-}
-
-const WINDOW_DURATION_MINUTES = 120;
-const WINDOW_HALF_DURATION_MINUTES = WINDOW_DURATION_MINUTES / 2;
-const WINDOW_OFFSET_STEP_MINUTES = 30;
-const WINDOW_OFFSET_MAX_MINUTES = 180;
-const WINDOW_OFFSET_RANGE = {
-  stepMinutes: WINDOW_OFFSET_STEP_MINUTES,
-  maxMinutes: WINDOW_OFFSET_MAX_MINUTES,
-};
 
 // tagはヘッダーの手順表示(ルート・商品・予約・受取QR)と同じ用語にそろえる。
 const HOW_TO_STEPS = [
@@ -175,17 +169,25 @@ function RouteItemSummary({ item, action }) {
   );
 }
 
+// 検索結果で予約へ進めない理由ごとの案内。
+const STALE_RESULT_MESSAGES = {
+  changed:
+    "検索条件が変更されています。「受け取れる商品を探す」を押すと、新しい条件の結果で予約できます。",
+  outdated:
+    "「今すぐ」で検索してから時間が経ったため、到着予定が変わっている可能性があります。もう一度検索してください。",
+};
+
 export default function RouteTest() {
-  // 起動時に1度だけ復元を試みる(TTL切れ・壊れたデータはnullになる)。
-  const initialRouteState = loadRouteTestState();
-  // 現在地の座標は保存しないため、「現在地」ラベルだけが復元された場合は
-  // 出発地を空に戻して手入力(または再取得)してもらう。
-  const [origin, setOrigin] = useState(
-    initialRouteState?.origin === CURRENT_LOCATION_LABEL
-      ? ""
-      : initialRouteState?.origin ?? "名古屋駅",
+  // 起動時に1度だけ復元を試みる(TTL切れ・壊れたデータはnull、古い「今すぐ」
+  // の結果は入力内容だけになる)。
+  const [initialRouteState] = useState(() => loadRouteTestState());
+  const [origin, setOrigin] = useState(initialRouteState?.origin ?? "名古屋駅");
+  // 出発地を「現在地」にしているか。座標(originLocation)は保存しないため、
+  // 復元直後は座標が無く、検索時に取得し直す。
+  const [useCurrentOrigin, setUseCurrentOrigin] = useState(
+    Boolean(initialRouteState?.useCurrentOrigin),
   );
-  // 「現在地を使う」で取得した座標({lat, lng})。nullなら出発地は手入力の文字列。
+  // 「現在地を使う」で取得した座標({lat, lng})。
   const [originLocation, setOriginLocation] = useState(null);
   const [locating, setLocating] = useState(false);
   const [locationMessage, setLocationMessage] = useState(null);
@@ -193,10 +195,16 @@ export default function RouteTest() {
   // 出発日時は既定で「今すぐ」。"custom"の時だけdepartureAtの入力値を使う。
   const [departureMode, setDepartureMode] = useState(initialRouteState?.departureMode ?? "now");
   const [departureAt, setDepartureAt] = useState(initialRouteState?.departureAt ?? "");
-  // 実際に検索に使った出発日時(「出発をずらす」目安の計算用)。
+  // 実際に検索に使った出発日時と、その検索条件(入力中の条件と食い違って
+  // いないかの判定用)。
   const [searchedDepartureAt, setSearchedDepartureAt] = useState(
     initialRouteState?.searchedDepartureAt ?? null,
   );
+  const [searchedKey, setSearchedKey] = useState(initialRouteState?.searchedKey ?? null);
+  const [searchedDepartureMode, setSearchedDepartureMode] = useState(
+    initialRouteState?.searchedDepartureMode ?? null,
+  );
+  const [searchedAtMs, setSearchedAtMs] = useState(initialRouteState?.searchedAtMs ?? null);
   const [result, setResult] = useState(initialRouteState?.result ?? null);
   // 選択中の受取地点(候補のname)。候補の切り替えはAPIを呼ばず、取得済みの
   // 候補(pass_at等)から画面を計算し直すだけ。
@@ -204,6 +212,11 @@ export default function RouteTest() {
     initialRouteState?.selectedPickupName ?? null,
   );
   const [error, setError] = useState(null);
+  const [notice, setNotice] = useState(
+    initialRouteState?.resultExpiredOnRestore
+      ? "前回の「今すぐ」の検索から時間が経ったため、結果をクリアしました。もう一度検索してください。"
+      : null,
+  );
   const [loading, setLoading] = useState(false);
   const [scrollToResults, setScrollToResults] = useState(false);
   const resultsRef = useRef(null);
@@ -217,11 +230,31 @@ export default function RouteTest() {
   const [itemsError, setItemsError] = useState(null);
 
   // 受取枠(2時間固定)の中心を、既定の通過予定時刻からどれだけずらしたか(分)。
-  // 枠の計算・重なり判定は取得済みのmatchedItemsに対する派生値として毎レンダー
-  // 計算するだけなので、この値を変えてもAPI通信は一切発生しない。
-  const [windowOffsetMinutes, setWindowOffsetMinutes] = useState(
-    initialRouteState?.windowOffsetMinutes ?? 0,
+  // 到着前に終わる枠にはならないよう、前へは-60分までに制限する。
+  const [windowOffsetMinutes, setWindowOffsetMinutesRaw] = useState(() =>
+    clampWindowOffset(initialRouteState?.windowOffsetMinutes ?? 0),
   );
+  function setWindowOffsetMinutes(value) {
+    setWindowOffsetMinutesRaw((current) =>
+      clampWindowOffset(typeof value === "function" ? value(current) : value),
+    );
+  }
+
+  // 画面を開いたまま時間が経っても、受取時間帯の終了・「今すぐ」の結果の
+  // 古さを判定し直すための現在時刻。
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!result) return undefined;
+    const intervalId = setInterval(() => setNowMs(Date.now()), CLOCK_TICK_MS);
+    function handleVisibilityChange() {
+      if (document.visibilityState === "visible") setNowMs(Date.now());
+    }
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [result]);
 
   // 分析結果を復元できた場合、商品一覧はGET /items(無料・軽量)だけ再実行
   // して埋め直す。Google Routes APIを再度呼ぶことはない。
@@ -233,24 +266,32 @@ export default function RouteTest() {
   }, []);
 
   // 入力・分析結果・受取枠offsetが変わるたびに保存し直す(戻る操作・
-  // リロード・別タブでの復元用)。
+  // リロード・別タブでの復元用)。現在地の座標は保存しない。
   useEffect(() => {
     saveRouteTestState({
       origin,
+      useCurrentOrigin,
       destination,
       departureMode,
       departureAt,
       searchedDepartureAt,
+      searchedKey,
+      searchedDepartureMode,
+      searchedAtMs,
       result,
       windowOffsetMinutes,
       selectedPickupName,
     });
   }, [
     origin,
+    useCurrentOrigin,
     destination,
     departureMode,
     departureAt,
     searchedDepartureAt,
+    searchedKey,
+    searchedDepartureMode,
+    searchedAtMs,
     result,
     windowOffsetMinutes,
     selectedPickupName,
@@ -279,23 +320,56 @@ export default function RouteTest() {
     }
   }
 
-  async function runSearch(departureValue) {
+  // conditions: 今回の検索条件(出発地・目的地・出発日時)。検索結果と一緒に
+  // 記録し、あとで入力中の条件と食い違っていないかを判定する。
+  async function runSearch(conditions) {
+    const searchNowMs = Date.now();
+    const departureValue =
+      conditions.departureMode === "now"
+        ? nowDepartureInputValue(searchNowMs)
+        : conditions.departureAt;
+
+    // 検索する時点の現在時刻で判定する(画面を開いたまま時間が経つと、
+    // 入力欄の最小値だけでは過去の日時が通ってしまうため)。
+    if (!isDepartureInputInFuture(departureValue, searchNowMs)) {
+      setError(DEPARTURE_IN_PAST_MESSAGE);
+      return;
+    }
+
     setLoading(true);
     setError(null);
+    setNotice(null);
     setResult(null);
+    setSearchedKey(null);
     setItemsError(null);
     setAllItems([]);
     setWindowOffsetMinutes(0);
 
     try {
+      let location = originLocation;
+      if (conditions.useCurrentOrigin && !location) {
+        // 復元直後など、現在地の座標をまだ持っていなければ取得し直す。
+        try {
+          location = await getCurrentLocation();
+          setOriginLocation(location);
+        } catch (locationError) {
+          setUseCurrentOrigin(false);
+          setLocationMessage(locationError.userMessage || locationError.message);
+          return;
+        }
+      }
       const data = await api.analyzeRoute({
-        origin: originLocation ? CURRENT_LOCATION_LABEL : origin.trim(),
-        destination: destination.trim(),
+        origin: conditions.useCurrentOrigin ? CURRENT_LOCATION_LABEL : conditions.origin.trim(),
+        destination: conditions.destination.trim(),
         departure_at: `${departureValue}:00+09:00`,
-        origin_location: originLocation,
+        origin_location: conditions.useCurrentOrigin ? location : null,
       });
       setResult(data);
       setSearchedDepartureAt(departureValue);
+      setSearchedKey(buildSearchKey(conditions));
+      setSearchedDepartureMode(conditions.departureMode);
+      setSearchedAtMs(searchNowMs);
+      setNowMs(Date.now());
       // 初期選択はルート上で最初に出会う受取地点(候補はルート順)。
       const candidates = normalizePickupCandidates(data);
       setSelectedPickupName(candidates[0]?.name ?? null);
@@ -315,18 +389,24 @@ export default function RouteTest() {
     }
   }
 
+  const currentConditions = {
+    useCurrentOrigin,
+    origin,
+    destination,
+    departureMode,
+    departureAt,
+  };
+
   function handleSubmit(event) {
     event.preventDefault();
-    runSearch(departureMode === "now" ? nowDepartureInputValue() : departureAt);
+    runSearch(currentConditions);
   }
 
-  // 受取時間のスライダーでは届かない商品向け。出発日時を目安の値に変えて
-  // 検索し直す(ユーザーが押した時だけ再検索する)。
-  function handleSearchWithDeparture(value) {
-    setDepartureMode("custom");
-    setDepartureAt(value);
+  // 受取時間帯をずらしても受け取れない場合に、現在時刻で探し直す。
+  function handleSearchFromNow() {
+    setDepartureMode("now");
     formRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
-    runSearch(value);
+    runSearch({ ...currentConditions, departureMode: "now" });
   }
 
   async function handleUseCurrentLocation() {
@@ -335,9 +415,11 @@ export default function RouteTest() {
     try {
       const location = await getCurrentLocation();
       setOriginLocation(location);
+      setUseCurrentOrigin(true);
     } catch (locationError) {
       // 拒否・未対応・取得失敗のいずれも、従来の出発地テキスト入力へ戻す。
       setOriginLocation(null);
+      setUseCurrentOrigin(false);
       setLocationMessage(locationError.userMessage || locationError.message);
     } finally {
       setLocating(false);
@@ -346,6 +428,7 @@ export default function RouteTest() {
 
   function handleClearCurrentLocation() {
     setOriginLocation(null);
+    setUseCurrentOrigin(false);
     setLocationMessage(null);
   }
 
@@ -356,12 +439,7 @@ export default function RouteTest() {
   }
 
   function shiftWindow(deltaMinutes) {
-    setWindowOffsetMinutes((current) =>
-      Math.max(
-        -WINDOW_OFFSET_MAX_MINUTES,
-        Math.min(WINDOW_OFFSET_MAX_MINUTES, current + deltaMinutes),
-      ),
-    );
+    setWindowOffsetMinutes((current) => current + deltaMinutes);
   }
 
   const pickupCandidates = normalizePickupCandidates(result);
@@ -372,25 +450,35 @@ export default function RouteTest() {
 
   // 受取枠(2時間固定)は、選択中の受取地点の到着目安を中心にwindowOffsetMinutes
   // だけずらしたものとして毎レンダー計算する派生値。専用のstateは持たない。
-  const passAtDate = selectedPickup ? new Date(selectedPickup.pass_at) : null;
-  const windowStartDate = passAtDate
-    ? new Date(
-        passAtDate.getTime() +
-          (windowOffsetMinutes - WINDOW_HALF_DURATION_MINUTES) * 60000,
-      )
+  const passAtMs = selectedPickup ? new Date(selectedPickup.pass_at).getTime() : NaN;
+  const pickupWindow = Number.isFinite(passAtMs)
+    ? pickupWindowAt(passAtMs, windowOffsetMinutes)
     : null;
-  const windowEndDate = passAtDate
-    ? new Date(
-        passAtDate.getTime() +
-          (windowOffsetMinutes + WINDOW_HALF_DURATION_MINUTES) * 60000,
-      )
-    : null;
+  const windowStartDate = pickupWindow ? new Date(pickupWindow.startMs) : null;
+  const windowEndDate = pickupWindow ? new Date(pickupWindow.endMs) : null;
 
-  // 受取時間帯が完全に終了しているか(windowEnd <= 現在時刻)。startだけが
-  // 過去でendが未来なら受取枠の途中であり、まだ予約できる(PMレビュー
-  // BLOCKER B1: startが過去というだけでは拒否しない。Backend側の
-  // model_validatorと同じ基準)。
-  const isPickupWindowExpired = windowEndDate ? windowEndDate.getTime() <= Date.now() : false;
+  // 受取は24時間可能(無人ロッカー)。今の受取枠が使えるか(到着後に受け取れ、
+  // まだ終了していないか)で、商品を「予約できる/在庫切れ/時間を変えれば
+  // 受け取れる」に分ける。
+  const classified = classifyItemsForWindow({
+    items: matchedItems,
+    passAtMs,
+    offsetMinutes: windowOffsetMinutes,
+    nowMs,
+  });
+  const isPickupWindowExpired = Boolean(pickupWindow) && !classified.windowUsable;
+
+  // 入力中の検索条件と表示中の結果が一致しているか(一致しない・古い結果
+  // では予約へ進ませない)。
+  const bookingState = resultBookingState(
+    {
+      currentKey: buildSearchKey(currentConditions),
+      searchedKey,
+      searchedDepartureMode,
+      searchedAtMs,
+    },
+    nowMs,
+  );
 
   // 受取時間帯が終了したら「受取時間を変更」を開き、案内どおりすぐ操作できるように
   // する。開くだけで自動では閉じない(操作中にパネルが閉じて下の要素が詰まり、
@@ -402,28 +490,8 @@ export default function RouteTest() {
     }
   }, [isPickupWindowExpired]);
 
-  // 実効受取予定時刻(windowOffsetMinutesだけ通過予定時刻をずらした、実際に
-  // 受取枠の中心となる瞬間)。商品の営業時間内判定だけはこの一点で行う。
-  // 内部判定用の値のため、画面には表示しない。
-  const effectiveDate = passAtDate
-    ? new Date(passAtDate.getTime() + windowOffsetMinutes * 60000)
-    : null;
-
-  const timeFilteredItems = effectiveDate
-    ? matchedItems.filter((item) =>
-        isItemAvailableAt(item, jstMinutesSinceMidnight(effectiveDate)),
-      )
-    : [];
-  // 受取可能時間は設定されているが、今の受取時間帯では受け取れない商品。
-  // 「受け取れる商品はありません」で止めず、ずらし方を案内する。
-  const laterItems = effectiveDate
-    ? matchedItems.filter(
-        (item) => hasPickupHours(item) && !timeFilteredItems.includes(item),
-      )
-    : [];
-
   const pickupDayLabel =
-    windowStartDate && formatJapanDay(windowStartDate) !== formatJapanDay(new Date())
+    windowStartDate && formatJapanDay(windowStartDate) !== formatJapanDay(new Date(nowMs))
       ? formatJapanDay(windowStartDate)
       : null;
   const pickupWindowLabel = windowStartDate
@@ -439,60 +507,32 @@ export default function RouteTest() {
       ? new Date(departureDate.getTime() + result.total_duration_minutes * 60000)
       : null;
 
-  // 「時間を変えると受け取れる商品」向けの操作は、商品ごとではなく一覧に1つだけ
-  // 出す。スライダーの範囲で届くなら最小のずらし幅、届かなければ最も早い
-  // 出発日時の目安(判定はどちらも既存の関数のまま)。
-  const laterAction = (() => {
-    if (!passAtDate || laterItems.length === 0) return null;
-    const offsets = laterItems
-      .map((item) => findWindowOffsetForItem(item, passAtDate.getTime(), WINDOW_OFFSET_RANGE))
-      .filter((offset) => offset !== null);
-    if (offsets.length > 0) {
-      const offset = offsets.reduce((best, current) =>
-        Math.abs(current) < Math.abs(best) ? current : best,
-      );
-      return { type: "shift", offset };
-    }
-    if (!departureDate) return null;
-    const suggestions = laterItems
-      .map((item) =>
-        suggestDepartureForItem(item, {
-          passAtMs: passAtDate.getTime(),
-          departureMs: departureDate.getTime(),
-        }),
-      )
-      .filter(Boolean)
-      .sort();
-    return suggestions.length > 0 ? { type: "depart", value: suggestions[0] } : null;
-  })();
-
+  // 「時間を変えると受け取れる商品」向けの操作は一覧に1つだけ出す。
+  // スライダーの範囲で使える受取枠があれば最小のずらし幅、無ければ現在時刻で
+  // 探し直す。
   function renderLaterAction() {
-    if (!laterAction) return null;
-    if (laterAction.type === "shift") {
-      const start = new Date(
-        passAtDate.getTime() + (laterAction.offset - WINDOW_HALF_DURATION_MINUTES) * 60000,
-      );
-      const end = new Date(
-        passAtDate.getTime() + (laterAction.offset + WINDOW_HALF_DURATION_MINUTES) * 60000,
-      );
+    if (classified.laterItems.length === 0) return null;
+    if (classified.laterOffset !== null) {
+      const shifted = pickupWindowAt(passAtMs, classified.laterOffset);
       return (
         <button
           type="button"
-          onClick={() => setWindowOffsetMinutes(laterAction.offset)}
+          onClick={() => setWindowOffsetMinutes(classified.laterOffset)}
           className={secondaryButtonClass}
         >
-          受取時間を {formatJapanTime(start)}〜{formatJapanTime(end)} にずらす
+          受取時間を {formatJapanTime(new Date(shifted.startMs))}〜
+          {formatJapanTime(new Date(shifted.endMs))} にずらす
         </button>
       );
     }
     return (
       <button
         type="button"
-        onClick={() => handleSearchWithDeparture(laterAction.value)}
+        onClick={handleSearchFromNow}
         disabled={loading}
         className={secondaryButtonClass}
       >
-        出発を {formatDepartureInputValue(laterAction.value)} にして探し直す
+        今から出発する条件で探し直す
       </button>
     );
   }
@@ -517,7 +557,7 @@ export default function RouteTest() {
       >
         <div>
           <span className="text-sm font-medium">出発地</span>
-          {originLocation ? (
+          {useCurrentOrigin ? (
             <div className="mt-1 flex min-h-[44px] items-center justify-between gap-2 rounded-lg border border-[#2f6f3e] bg-[#f7fbf6] px-3">
               <span className="text-base">現在地から出発</span>
               <button
@@ -547,6 +587,9 @@ export default function RouteTest() {
                 {locating ? "取得中…" : "現在地"}
               </button>
             </div>
+          )}
+          {useCurrentOrigin && !originLocation && (
+            <p className="mt-1 text-xs text-gray-500">検索するときに現在地を取得し直します</p>
           )}
           {locationMessage && (
             <p className="mt-1 text-sm text-red-600" role="alert">
@@ -597,7 +640,7 @@ export default function RouteTest() {
             <input
               type="datetime-local"
               value={departureAt}
-              min={nowDepartureInputValue(Date.now(), 1)}
+              min={nowDepartureInputValue(nowMs, 1)}
               onChange={(event) => setDepartureAt(event.target.value)}
               required
               aria-label="出発日時"
@@ -605,6 +648,8 @@ export default function RouteTest() {
             />
           )}
         </fieldset>
+
+        {notice && <p className="text-sm text-gray-700">{notice}</p>}
 
         {error && (
           <p className="text-sm text-red-600" role="alert">
@@ -643,6 +688,20 @@ export default function RouteTest() {
 
       {result && (
         <section ref={resultsRef} className="mt-6 scroll-mt-16 space-y-4" aria-live="polite">
+          {!bookingState.ok && (
+            <div className="rounded-xl border border-amber-300 bg-amber-50 p-4" role="status">
+              <p className="text-sm text-amber-900">{STALE_RESULT_MESSAGES[bookingState.reason]}</p>
+              <button
+                type="button"
+                onClick={() => runSearch(currentConditions)}
+                disabled={loading}
+                className={`${primaryButtonClass} mt-3`}
+              >
+                {loading ? "探しています…" : "この条件で探し直す"}
+              </button>
+            </div>
+          )}
+
           {pickupCandidates.length === 0 ? (
             <div className="rounded-xl bg-white p-4 shadow-sm">
               <h2 className="text-lg font-semibold">受取地点が見つかりませんでした</h2>
@@ -765,7 +824,9 @@ export default function RouteTest() {
                 {pickupDayLabel && (
                   <p className="mt-2 text-sm font-medium">{pickupDayLabel}の受取です</p>
                 )}
-                <p className="mt-2 text-xs text-gray-500">到着目安は寄り道時間を含みません</p>
+                <p className="mt-2 text-xs text-gray-500">
+                  受取は無人ロッカーで24時間可能です。到着目安は寄り道時間を含みません
+                </p>
                 {isPickupWindowExpired && (
                   <p className="mt-2 text-sm text-red-600" role="alert">
                     受取時間帯が終了しています。受取時間をずらすか、もう一度検索してください。
@@ -801,22 +862,31 @@ export default function RouteTest() {
 
                 {!itemsLoading &&
                   !itemsError &&
-                  timeFilteredItems.length === 0 &&
-                  laterItems.length > 0 && (
+                  matchedItems.length > 0 &&
+                  classified.bookableItems.length === 0 && (
                     <div className="mt-3 rounded-lg bg-amber-50 p-3">
                       <p className="text-sm text-amber-900">
-                        受取時間帯{" "}
-                        <span className="whitespace-nowrap">{pickupWindowLabel}</span>{" "}
-                        <span className="inline-block">に受け取れる商品はありません。</span>
+                        {classified.windowUsable ? (
+                          "この受取地点の商品は、すべて在庫切れです。"
+                        ) : (
+                          <>
+                            受取時間帯{" "}
+                            <span className="whitespace-nowrap">{pickupWindowLabel}</span>{" "}
+                            <span className="inline-block">は終了しているため予約できません。</span>
+                          </>
+                        )}
                       </p>
-                      {laterAction && <div className="mt-2">{renderLaterAction()}</div>}
+                      {classified.laterItems.length > 0 && (
+                        <div className="mt-2">{renderLaterAction()}</div>
+                      )}
                     </div>
                   )}
 
-                {!itemsLoading && !itemsError && timeFilteredItems.length > 0 && (
+                {!itemsLoading && !itemsError && classified.listedItems.length > 0 && (
                   <ul className="mt-3 space-y-2">
-                    {timeFilteredItems.map((item) => {
-                      const bookable = item.stock > 0 && !isPickupWindowExpired;
+                    {classified.listedItems.map((item) => {
+                      const bookable =
+                        bookingState.ok && classified.bookableItems.includes(item);
                       const action = bookable ? (
                         <span
                           aria-hidden="true"
@@ -827,7 +897,7 @@ export default function RouteTest() {
                       ) : (
                         item.stock > 0 && (
                           <span className="mt-2 inline-flex min-h-[44px] w-full items-center justify-center text-center text-[11px] text-gray-500">
-                            受取時間終了
+                            {bookingState.ok ? "受取時間終了" : "再検索すると予約できます"}
                           </span>
                         )
                       );
@@ -866,16 +936,13 @@ export default function RouteTest() {
                   </ul>
                 )}
 
-                {!itemsLoading && !itemsError && laterItems.length > 0 && (
+                {!itemsLoading && !itemsError && classified.laterItems.length > 0 && (
                   <div className="mt-4">
                     <h3 className="text-sm font-semibold text-gray-700">
                       時間を変えると受け取れる商品
                     </h3>
-                    {timeFilteredItems.length > 0 && laterAction && (
-                      <div className="mt-2">{renderLaterAction()}</div>
-                    )}
                     <ul className="mt-2 space-y-2">
-                      {laterItems.map((item) => (
+                      {classified.laterItems.map((item) => (
                         <li
                           key={item.id}
                           className="rounded-lg border border-dashed border-gray-300 bg-gray-50 p-3"
@@ -910,11 +977,11 @@ export default function RouteTest() {
                 </summary>
                 <div className="px-4 pb-4">
                   <p className="text-xs text-gray-500">
-                    到着目安の前後3時間まで、30分単位でずらせます
+                    到着後に受け取れる時間帯の中で、30分単位でずらせます（最大3時間後まで）
                   </p>
                   <input
                     type="range"
-                    min={-WINDOW_OFFSET_MAX_MINUTES}
+                    min={WINDOW_OFFSET_MIN_MINUTES}
                     max={WINDOW_OFFSET_MAX_MINUTES}
                     step={WINDOW_OFFSET_STEP_MINUTES}
                     value={windowOffsetMinutes}
@@ -926,7 +993,7 @@ export default function RouteTest() {
                     <button
                       type="button"
                       onClick={() => shiftWindow(-WINDOW_OFFSET_STEP_MINUTES)}
-                      disabled={windowOffsetMinutes <= -WINDOW_OFFSET_MAX_MINUTES}
+                      disabled={windowOffsetMinutes <= WINDOW_OFFSET_MIN_MINUTES}
                       className={secondaryButtonClass}
                     >
                       −30分

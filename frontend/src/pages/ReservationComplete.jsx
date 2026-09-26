@@ -13,7 +13,6 @@ import {
 import { loadRouteContext } from "../utils/routeContext";
 import { toUserMessage } from "../utils/errorMessages";
 import { buildGoogleMapsPlaceUrl, buildGoogleMapsUrl, isManualOrigin } from "../utils/googleMaps";
-import { formatPickupHours } from "../utils/pickupHours";
 import { AppLayout, primaryButtonClass, secondaryButtonClass } from "../components/ui";
 
 // 初回読み込み(予約照会)の失敗も、Backendの英文detail("Reservation not
@@ -43,7 +42,7 @@ function formatRequestedAt(value) {
 // 「時間指定なし」とする(この機能追加以前の既存予約・RouteTestを経由しない
 // 予約はpickup_window_start/endが両方nullのため、常にこちらになる)。
 function formatPickupWindow(startValue, endValue) {
-  if (!startValue || !endValue) return "時間指定なし";
+  if (!startValue || !endValue) return "時間指定なし（24時間受取可）";
   const dayFormatter = new Intl.DateTimeFormat("ja-JP", {
     timeZone: "Asia/Tokyo",
     month: "long",
@@ -319,13 +318,6 @@ export default function ReservationComplete() {
   const isPending = reservation.status === "pending";
   const itemTitle = reservation.item?.title || null;
   const itemLocation = reservation.item?.location_name || null;
-  const itemPickupHours =
-    reservation.item?.pickup_available_from && reservation.item?.pickup_available_to
-      ? {
-          from: reservation.item.pickup_available_from,
-          to: reservation.item.pickup_available_to,
-        }
-      : null;
   // PMレビューMAJOR M1: completed/cancelledはaccess_tokenを既に削除済み
   // (このタブのstateにまだ残っていれば直近の更新自体は成功し得るが、
   // 最終状態はこれ以上変わらないため再取得する意味が無い)。押せてしまうと
@@ -356,14 +348,6 @@ export default function ReservationComplete() {
     { label: "氏名", value: reservation.user_name },
     ...(reservation.requested_at
       ? [{ label: "希望日時", value: formatRequestedAt(reservation.requested_at) }]
-      : []),
-    ...(itemPickupHours
-      ? [
-          {
-            label: "営業時間",
-            value: `${formatPickupHours(itemPickupHours.from)}〜${formatPickupHours(itemPickupHours.to)}`,
-          },
-        ]
       : []),
     ...(reservation.payment_method
       ? [

@@ -20,9 +20,9 @@ class Item(BaseModel):
     stock: int
     location_name: str
     created_at: datetime | None = None
-    # 商品の受取可能時間(毎日繰り返す時間帯)。どちらかがNoneの場合は
-    # 「受取可能時間が未設定」を意味し、「常に受取可能」とは解釈しない
-    # (Frontend側の時間帯フィルタで、未設定の商品は表示対象から除外する)。
+    # 非推奨: 受取場所は無人ロッカーで24時間受取可能なため、商品ごとの
+    # 受取可能時間(営業時間)は廃止した。DBでは常にnullで、Frontendは
+    # 参照しない(列はBackend/DBの同時デプロイを避けるために残しているだけ)。
     pickup_available_from: time | None = None
     pickup_available_to: time | None = None
     shop_id: UUID | None = None

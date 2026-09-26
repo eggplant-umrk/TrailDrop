@@ -515,7 +515,7 @@ insert into public.items (
 select
     candidate.id, candidate.title, 'pickup', candidate.price,
     candidate.initial_stock, '道の駅 ロック・ガーデンひちそう',
-    '07:00'::time, '21:00'::time, shops.id, candidate.description,
+    null::time, null::time, shops.id, candidate.description,
     candidate.category, candidate.content_amount, candidate.storage_method,
     candidate.source_url,
     'デモ用設定価格。提供者の販売価格ではありません。',
@@ -573,12 +573,16 @@ values
 on conflict (id) do update
 set is_active = false;
 
--- Example pickup hours for the seeded pickup items. The experience item is
--- intentionally left without a window.
+-- Pickup locations are unattended lockers: pickup is available 24 hours a
+-- day. pickup_available_from/to are deprecated and always null
+-- (supabase/migrations/20260927090000_pickup_24h_lockers.sql).
 update public.items
-set pickup_available_from = '09:00',
-    pickup_available_to = '18:00'
-where id in (
-    '11111111-1111-4111-8111-111111111111',
-    '22222222-2222-4222-8222-222222222222'
-);
+set pickup_available_from = null,
+    pickup_available_to = null
+where pickup_available_from is not null
+   or pickup_available_to is not null;
+
+comment on column public.items.pickup_available_from is
+    'Deprecated: pickup is available 24h (unattended lockers). Always null; not used.';
+comment on column public.items.pickup_available_to is
+    'Deprecated: pickup is available 24h (unattended lockers). Always null; not used.';
