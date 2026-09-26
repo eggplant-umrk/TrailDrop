@@ -26,7 +26,9 @@ function mapItem(serverItem) {
 
 export default function ItemList() {
   const [items, setItems] = useState([]);
-  const [loading, setLoading] = useState(false);
+  // 初回レンダーで空状態(「現在取り扱いはありません。」)が一瞬出ないよう、
+  // 取得開始前からloading扱いにする。
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
   async function load() {

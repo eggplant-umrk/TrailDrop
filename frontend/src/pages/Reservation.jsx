@@ -189,11 +189,15 @@ export default function Reservation() {
   // 表示する(「再試行すれば安全」と誤解させる表示にしないため)。
   const [ambiguousFailure, setAmbiguousFailure] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  // 商品取得失敗時の「再試行」で増やす。下の商品取得effectの依存に含め、
+  // 同じ取得処理をもう一度実行する。
+  const [itemReloadKey, setItemReloadKey] = useState(0);
 
   useEffect(() => {
     let mounted = true;
     async function loadItem() {
       setLoading(true);
+      setError(null);
       try {
         const items = await api.getItems();
         const found = (items || []).find((it) => String(it.id) === String(id));
@@ -219,7 +223,7 @@ export default function Reservation() {
     }
     loadItem();
     return () => (mounted = false);
-  }, [id]);
+  }, [id, itemReloadKey]);
 
   // /reserve/:id/confirmへ直接アクセス・リロードした場合など、確認に必要な
   // 入力内容(location.state・draftのどちらにも無い)が無ければ、確認画面を
@@ -283,6 +287,23 @@ export default function Reservation() {
     return (
       <AppLayout step={3}>
         <p className="p-4 text-red-600">{error}</p>
+        {/* 再試行中はloadingで「読み込み中…」表示に切り替わるため連打できない。 */}
+        <div className="space-y-2">
+          <button
+            type="button"
+            onClick={() => {
+              // effect実行を待たずに同じrenderで「読み込み中…」へ切り替える。
+              setLoading(true);
+              setItemReloadKey((key) => key + 1);
+            }}
+            className={secondaryButtonClass}
+          >
+            再試行
+          </button>
+          <button type="button" onClick={() => navigate("/")} className={primaryButtonClass}>
+            トップへ戻る
+          </button>
+        </div>
       </AppLayout>
     );
   if (!item)
