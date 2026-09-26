@@ -111,11 +111,11 @@ export default function StaffScan() {
   }
 
   return (
-    <main className="min-h-screen bg-[#f7fbf6] px-4 py-8 text-[#16381b] sm:py-12">
-      <div className="mx-auto flex min-h-[calc(100vh-4rem)] max-w-3xl flex-col">
+    <main className="min-h-screen bg-[#f7fbf6] px-4 py-6 text-[#16381b] sm:px-6 sm:py-8">
+      <div className="mx-auto flex min-h-[calc(100vh-3rem)] max-w-6xl flex-col sm:min-h-[calc(100vh-4rem)]">
         <header className="text-center">
-          <p className="text-sm font-semibold text-[#2f6f3e]">TrailDrop</p>
-          <h1 className="mt-2 text-3xl font-semibold sm:text-4xl">
+          <p className="text-base font-semibold text-[#2f6f3e] sm:text-lg">TrailDrop</p>
+          <h1 className="mt-2 text-4xl font-semibold sm:text-5xl">
             {view === "setup" ? "受取端末の準備" : "商品を受け取る"}
           </h1>
         </header>
@@ -146,13 +146,14 @@ export default function StaffScan() {
         )}
 
         {view === "scanning" && (
-          <section className="mx-auto mt-8 w-full max-w-xl" aria-label="QRコード読み取り">
+          <section className="mx-auto mt-5 w-full max-w-4xl sm:mt-6" aria-label="QRコード読み取り">
             <QrScanner
               onDetected={handleDetected}
               onCancel={() => setView("paused")}
               showManualEntryHint={false}
+              displaySize="large"
             />
-            <p className="mx-auto mt-6 max-w-sm text-center text-lg font-medium leading-relaxed">
+            <p className="mx-auto mt-5 max-w-2xl text-center text-2xl font-medium leading-snug sm:text-3xl">
               スマートフォンの
               <span className="block">受取QRコードをかざしてください</span>
             </p>
@@ -187,25 +188,29 @@ export default function StaffScan() {
 
         {view === "completed" && (
           <section
-            className="flex flex-1 flex-col items-center justify-center py-10 text-center"
+            className="flex flex-1 flex-col items-center justify-center py-8 text-center sm:py-10"
             aria-live="polite"
           >
             <div
-              className="flex h-24 w-24 items-center justify-center rounded-full bg-[#2f6f3e] text-5xl font-semibold text-white"
+              className="flex h-32 w-32 items-center justify-center rounded-full bg-[#2f6f3e] text-7xl font-semibold text-white lg:h-40 lg:w-40 lg:text-8xl"
               aria-hidden="true"
             >
               ✓
             </div>
-            <h2 className="mt-6 text-4xl font-semibold text-[#2f6f3e] sm:text-5xl">受取完了</h2>
-            <p className="mt-8 text-xl font-semibold sm:text-2xl">
+            <h2 className="mt-7 text-5xl font-semibold text-[#2f6f3e] sm:text-6xl lg:text-7xl">
+              受取完了
+            </h2>
+            <p className="mt-8 max-w-4xl text-2xl font-semibold leading-snug sm:text-3xl lg:text-4xl">
               {result?.itemTitle || "商品情報を取得できませんでした"}
             </p>
-            <p className="mt-3 text-lg text-gray-700">{result?.userName} さん</p>
-            <p className="mt-8 text-lg">受け取りありがとうございました</p>
+            <p className="mt-4 text-xl text-gray-700 sm:text-2xl lg:text-3xl">
+              {result?.userName} さん
+            </p>
+            <p className="mt-8 text-xl sm:text-2xl">受け取りありがとうございました</p>
             <button
               type="button"
               onClick={restartScan}
-              className="mt-8 min-h-12 rounded bg-[#2f6f3e] px-8 py-3 font-semibold text-white"
+              className="mt-8 min-h-16 rounded bg-[#2f6f3e] px-12 py-4 text-xl font-semibold text-white sm:text-2xl"
             >
               次の方の受け取りへ
             </button>
