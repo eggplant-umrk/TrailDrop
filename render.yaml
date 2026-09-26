@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: traildrop-api
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false
+      - key: STAFF_API_TOKEN
+        sync: false
+      - key: GOOGLE_MAPS_API_KEY
+        sync: false
+      - key: ROUTE_ANALYSIS_CLIENT_KEY
+        sync: false
+      - key: PICKUP_SELECTION_MODE
+        value: fixed
+      - key: PICKUP_MAX_DISTANCE_METERS
+        value: "3000"
+      - key: TRUSTED_PROXY_IPS
+        value: ""

@@ -49,6 +49,12 @@ app.add_middleware(
 )
 
 
+@app.get("/health")
+def health_check():
+    """Deployment health check that does not depend on Supabase or Google APIs."""
+    return {"status": "ok"}
+
+
 # create_client()はHTTPコネクションプールを内部に持つため、リクエストの
 # たびに新規生成すると無駄にコネクションを張り直すことになる。supabase-py
 # のClientはリクエストごとに独立したHTTP呼び出しを行うだけで、複数
