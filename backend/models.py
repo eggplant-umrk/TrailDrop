@@ -25,6 +25,14 @@ class Item(BaseModel):
     # (Frontend側の時間帯フィルタで、未設定の商品は表示対象から除外する)。
     pickup_available_from: time | None = None
     pickup_available_to: time | None = None
+    shop_id: UUID | None = None
+    description: str | None = None
+    category: str | None = None
+    content_amount: str | None = None
+    storage_method: str | None = None
+    source_url: str | None = None
+    price_note: str | None = None
+    is_active: bool = True
 
 
 # payment_methodは意図的にLiteral/enumにしていない。不正な値をpydanticの

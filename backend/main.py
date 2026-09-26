@@ -494,7 +494,12 @@ def require_valid_uuid(value: str) -> None:
 @app.get("/items", response_model=list[Item])
 def list_items():
     try:
-        response = get_supabase().table("items").select("*").execute()
+        # Backendはservice-roleでRLSを迂回するため、公開商品だけを返す条件を
+        # API側にも明示する。非公開商品のUUIDを直接予約する経路はRPC側でも
+        # 同じis_active条件により拒否される。
+        response = (
+            get_supabase().table("items").select("*").eq("is_active", True).execute()
+        )
         return response.data
     except HTTPException:
         raise

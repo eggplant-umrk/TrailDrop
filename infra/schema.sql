@@ -2,6 +2,18 @@
 
 create extension if not exists pgcrypto;
 
+create table if not exists public.shops (
+    id uuid primary key default gen_random_uuid(),
+    name varchar not null constraint shops_name_key unique,
+    description text,
+    website_url text,
+    created_at timestamptz default now()
+);
+
+alter table public.shops
+    add column if not exists description text,
+    add column if not exists website_url text;
+
 create table if not exists public.items (
     id uuid primary key default gen_random_uuid(),
     title varchar not null,
@@ -9,6 +21,14 @@ create table if not exists public.items (
     price integer not null constraint items_price_nonnegative check (price >= 0),
     stock integer not null constraint items_stock_nonnegative check (stock >= 0),
     location_name varchar not null,
+    shop_id uuid references public.shops(id),
+    description text,
+    category varchar,
+    content_amount varchar,
+    storage_method text,
+    source_url text,
+    price_note text,
+    is_active boolean not null default true,
     created_at timestamptz default now()
 );
 
@@ -16,7 +36,15 @@ create table if not exists public.items (
 -- "no pickup window recorded" -- not "always available".
 alter table public.items
     add column if not exists pickup_available_from time,
-    add column if not exists pickup_available_to time;
+    add column if not exists pickup_available_to time,
+    add column if not exists shop_id uuid,
+    add column if not exists description text,
+    add column if not exists category varchar,
+    add column if not exists content_amount varchar,
+    add column if not exists storage_method text,
+    add column if not exists source_url text,
+    add column if not exists price_note text,
+    add column if not exists is_active boolean not null default true;
 
 create table if not exists public.reservations (
     id uuid primary key default gen_random_uuid(),
@@ -68,6 +96,17 @@ alter table public.reservations
 
 do $$
 begin
+    if not exists (
+        select 1
+        from pg_constraint
+        where conname = 'items_shop_id_fkey'
+          and conrelid = 'public.items'::regclass
+    ) then
+        alter table public.items
+            add constraint items_shop_id_fkey
+            foreign key (shop_id) references public.shops(id);
+    end if;
+
     if not exists (
         select 1
         from pg_constraint
@@ -153,19 +192,30 @@ begin
 end
 $$;
 
+alter table public.shops enable row level security;
 alter table public.items enable row level security;
 alter table public.reservations enable row level security;
+
+drop policy if exists shops_public_read on public.shops;
+create policy shops_public_read
+on public.shops
+for select
+to anon, authenticated
+using (true);
 
 drop policy if exists items_public_read on public.items;
 create policy items_public_read
 on public.items
 for select
 to anon, authenticated
-using (true);
+using (is_active = true);
 
 grant select on table public.items to anon, authenticated;
 revoke insert, update, delete on table public.items from anon, authenticated;
+grant select on table public.shops to anon, authenticated;
+revoke insert, update, delete on table public.shops from anon, authenticated;
 revoke all on table public.reservations from anon, authenticated;
+grant select, insert, update on table public.shops to service_role;
 grant select, update on table public.items to service_role;
 grant select, insert, update on table public.reservations to service_role;
 
@@ -205,11 +255,15 @@ begin
     update public.items
     set stock = stock - 1
     where id = p_item_id
+      and is_active = true
       and stock > 0
     returning type into item_type;
 
     if not found then
-        if exists (select 1 from public.items where id = p_item_id) then
+        if exists (
+            select 1 from public.items
+            where id = p_item_id and is_active = true
+        ) then
             raise exception 'OUT_OF_STOCK' using errcode = 'P0001';
         end if;
         raise exception 'ITEM_NOT_FOUND' using errcode = 'P0002';
@@ -392,7 +446,102 @@ alter table public.pickup_locations enable row level security;
 revoke all on table public.pickup_locations from anon, authenticated;
 grant select on table public.pickup_locations to service_role;
 
-insert into public.items (id, title, type, price, stock, location_name)
+-- Product providers are separate from the pickup location recorded on items.
+insert into public.shops (id, name)
+values
+    ('b1111111-1111-4111-8111-111111111111', '七宗食品「こぶしの里」'),
+    ('b2222222-2222-4222-8222-222222222222', '炭火焼肉たつみや'),
+    ('b3333333-3333-4333-8333-333333333333', '福薪'),
+    ('b4444444-4444-4444-8444-444444444444', '株式会社菊泉本舗')
+on conflict (name) do update
+set name = excluded.name;
+
+with candidate (
+    id, title, price, initial_stock, description, category, content_amount,
+    storage_method, source_url, shop_name
+) as (
+    values
+        (
+            'a1111111-1111-4111-8111-111111111111'::uuid,
+            '鮎の甘露煮の燻製 100gパック', 540, 12,
+            '鮎の甘露煮を燻製にした、七宗食品の川魚のお土産。',
+            '川魚・燻製', '100g',
+            '常温。直射日光・高温多湿を避け、冷暗所で保存。',
+            'https://hida-seiryu.com/product/kunsei/kb0220010/',
+            '七宗食品「こぶしの里」'
+        ),
+        (
+            'a2222222-2222-4222-8222-222222222222'::uuid,
+            '若鶏の皮肝けいちゃん 200g×2袋', 900, 8,
+            '岐阜県産若鶏の皮・砂肝・心臓などを米麹味噌で味付け。',
+            'けいちゃん', '200g×2袋',
+            '冷凍。受取までの保冷方法を確認。',
+            'https://www.furusato-tax.jp/product/detail/21504/7117947',
+            '炭火焼肉たつみや'
+        ),
+        (
+            'a3333333-3333-4333-8333-333333333333'::uuid,
+            '東濃ひのき薪 20kg×1箱 皮つき', 2800, 2,
+            '七宗町の森林資源を活用した、自然乾燥の東濃ヒノキ薪。',
+            '森林・薪', '20kg×1箱',
+            '常温。天然材料のため虫・カビに注意。',
+            'https://www.furusato-tax.jp/product/detail/21504/7211223',
+            '福薪'
+        ),
+        (
+            'a4444444-4444-4444-8444-444444444444'::uuid,
+            '出来立てくんたま（3個入×5袋）通常パック', 1500, 10,
+            '岐阜県産の鶏卵を鮎だしで味付けした、こぶしの里の燻製卵。',
+            '燻製卵', '3個入×5袋',
+            '要冷蔵。賞味期限は製造日を含め5日。',
+            'https://hida-seiryu.com/product/kunsei/kb0220033/',
+            '七宗食品「こぶしの里」'
+        ),
+        (
+            'a5555555-5555-4555-8555-555555555555'::uuid,
+            '菊泉本舗 特選 お茶せんべい 26枚入り', 700, 12,
+            '七宗町の菊泉本舗が扱う、お茶の風味を楽しめるせんべい。',
+            '茶菓子', '26枚',
+            '保存方法は現物表示を確認。',
+            'https://furusato.saisoncard.co.jp/products/detail.php?product_id=328660',
+            '株式会社菊泉本舗'
+        )
+)
+insert into public.items (
+    id, title, type, price, stock, location_name,
+    pickup_available_from, pickup_available_to, shop_id, description,
+    category, content_amount, storage_method, source_url, price_note, is_active
+)
+select
+    candidate.id, candidate.title, 'pickup', candidate.price,
+    candidate.initial_stock, '道の駅 ロック・ガーデンひちそう',
+    '07:00'::time, '21:00'::time, shops.id, candidate.description,
+    candidate.category, candidate.content_amount, candidate.storage_method,
+    candidate.source_url,
+    'デモ用設定価格。提供者の販売価格ではありません。',
+    true
+from candidate
+join public.shops on shops.name = candidate.shop_name
+on conflict (id) do update
+set title = excluded.title,
+    type = excluded.type,
+    price = excluded.price,
+    location_name = excluded.location_name,
+    pickup_available_from = excluded.pickup_available_from,
+    pickup_available_to = excluded.pickup_available_to,
+    shop_id = excluded.shop_id,
+    description = excluded.description,
+    category = excluded.category,
+    content_amount = excluded.content_amount,
+    storage_method = excluded.storage_method,
+    source_url = excluded.source_url,
+    price_note = excluded.price_note,
+    is_active = excluded.is_active;
+
+-- stock is intentionally omitted from DO UPDATE: re-running the canonical
+-- schema after reservations must not restore already-consumed inventory.
+
+insert into public.items (id, title, type, price, stock, location_name, is_active)
 values
     (
         '11111111-1111-4111-8111-111111111111',
@@ -400,7 +549,8 @@ values
         'pickup',
         800,
         12,
-        '道の駅 ロック・ガーデンひちそう'
+        '道の駅 ロック・ガーデンひちそう',
+        false
     ),
     (
         '22222222-2222-4222-8222-222222222222',
@@ -408,7 +558,8 @@ values
         'pickup',
         950,
         20,
-        '道の駅 ロック・ガーデンひちそう'
+        '道の駅 ロック・ガーデンひちそう',
+        false
     ),
     (
         '33333333-3333-4333-8333-333333333333',
@@ -416,9 +567,11 @@ values
         'experience',
         3500,
         8,
-        '七宗町地域交流スペース'
+        '七宗町地域交流スペース',
+        false
     )
-on conflict (id) do nothing;
+on conflict (id) do update
+set is_active = false;
 
 -- Example pickup hours for the seeded pickup items. The experience item is
 -- intentionally left without a window.
