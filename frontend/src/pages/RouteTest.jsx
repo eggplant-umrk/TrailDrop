@@ -11,6 +11,7 @@ import {
 import ItemThumbnail from "../components/ItemThumbnail";
 import { toUserMessage } from "../utils/errorMessages";
 import { getCurrentLocation } from "../utils/geolocation";
+import { CURRENT_LOCATION_LABEL } from "../utils/googleMaps";
 import { getShopName } from "../utils/shopNames";
 import {
   formatDistanceFromRoute,
@@ -35,9 +36,9 @@ export {
   parseTimeStringToMinutes,
 } from "../utils/pickupHours";
 
-// 「現在地を使う」選択中に出発地として送る表示用ラベル。実際の出発地は
-// origin_location(座標)としてBackendへ送る。座標自体は保存しない。
-const CURRENT_LOCATION_LABEL = "現在地";
+// 「現在地を使う」選択中は出発地としてCURRENT_LOCATION_LABEL(表示用ラベル、
+// utils/googleMaps.js)を送り、実際の出発地はorigin_location(座標)として
+// Backendへ送る。座標自体は保存しない。
 
 // POST /routes/analyzeの失敗を日本語で案内する(Backend/route_analysis.pyの
 // detailは英語の内部向け文言のため、そのまま表示しない)。422のうち

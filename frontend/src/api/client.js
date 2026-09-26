@@ -13,6 +13,9 @@ const ROUTE_ANALYSIS_TIMEOUT_MS = 18000;
 const TIMEOUT_ERROR_MESSAGE =
   "通信がタイムアウトしました。結果が不明なため、内容を確認してから再試行してください。";
 
+const API_BASE_URL_MISSING_MESSAGE =
+  "APIの接続先が設定されていません。管理者に確認してください。";
+
 // main.pyのVALID_PAYMENT_METHODSと合わせる。実決済は行わないモック決済。
 const VALID_PAYMENT_METHODS = new Set(["paypay", "credit_card"]);
 
@@ -41,7 +44,11 @@ async function request(path, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
   const url = BASE ? `${BASE}${path}` : null;
 
   if (!url) {
-    throw new Error("VITE_API_BASE_URL is not configured");
+    // statusが無いErrorは通信失敗扱い(「通信環境を確認」)になり、設定不足と
+    // 気づけないため、設定不足と分かる日本語の利用者向け文言を付ける。
+    const configError = new Error("VITE_API_BASE_URL is not configured");
+    configError.userMessage = API_BASE_URL_MISSING_MESSAGE;
+    throw configError;
   }
 
   const controller = new AbortController();
@@ -373,49 +380,13 @@ export async function cancelReservation(reservationId, reservationToken) {
   });
 }
 
-// DEMO_MODEでは実際のGoogle Routes APIを一切呼ばず、決定的なダミー結果を
-// 返す。route_analysis.py(Backend)と同じ形(pass_atはdeparture_atに固定の
-// 所要時間を足した値、pass_pointはdemoGetItems()の商品が実際に紐づく
-// location_name)にすることで、RouteTest.jsxの以降のロジック(受取時間の
-// 計算・商品の絞り込み)を本番と全く同じコードパスで動かせる。
-const DEMO_FIRST_LEG_MINUTES = 60;
-const DEMO_TOTAL_DURATION_MINUTES = 120;
-const DEMO_TOTAL_DISTANCE_METERS = 60000;
-// demoGetItems()の商品が実際に持つlocation_nameと一致させる。
-const DEMO_PASS_POINT = "道の駅 ロック・ガーデンひちそう";
-
-function demoAnalyzeRoute({ origin, destination, departure_at }) {
-  const departureDate = new Date(departure_at);
-  const passAt = new Date(departureDate.getTime() + DEMO_FIRST_LEG_MINUTES * 60000).toISOString();
-  return {
-    origin,
-    destination,
-    pass_point: DEMO_PASS_POINT,
-    pass_at: passAt,
-    // DEMOでは実在地点の座標を持たない(未確認の座標を使わない)ため、座標は
-    // null。Google Mapsの経由地は地点名で開く。
-    pass_point_lat: null,
-    pass_point_lng: null,
-    pickup_candidates: [
-      {
-        name: DEMO_PASS_POINT,
-        lat: null,
-        lng: null,
-        pass_at: passAt,
-        distance_from_route_meters: 0,
-      },
-    ],
-    total_duration_minutes: DEMO_TOTAL_DURATION_MINUTES,
-    total_distance_meters: DEMO_TOTAL_DISTANCE_METERS,
-  };
-}
-
+// ルート分析はDEMO_MODEでも固定値を使わず、本番と同じBackend(POST
+// /routes/analyze → Google Routes API)で出発地・目的地に応じた実際の所要時間・
+// 距離・通過予定時刻を取得する(実機デモ用)。APIキーをブラウザに出さないため
+// Googleを直接は呼ばない。VITE_API_BASE_URL未設定・Backend/Googleのエラーは
+// 本番と同じ既存のエラーハンドリング(RouteTest.jsx)に乗る。
 // origin_location({lat, lng})は「現在地を使う」で取得した場合だけ送る。
 export async function analyzeRoute({ origin, destination, departure_at, origin_location = null }) {
-  if (DEMO_MODE) {
-    await new Promise((r) => setTimeout(r, 200));
-    return demoAnalyzeRoute({ origin, destination, departure_at });
-  }
   return await request(
     `/routes/analyze`,
     {

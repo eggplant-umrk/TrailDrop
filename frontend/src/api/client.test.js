@@ -131,42 +131,59 @@ describe("DEMO_MODE product master", () => {
 describe("analyzeRoute pickup candidates", () => {
   const departure = "2999-01-01T09:00:00+09:00";
 
-  it("DEMO_MODE returns one pickup candidate and keeps the existing pass_point/pass_at contract", async () => {
-    const api = await loadClient({ VITE_DEMO_MODE: "true", VITE_API_BASE_URL: "" });
+  it("DEMO_MODE uses the real route analysis API instead of fixed durations", async () => {
+    const apiResult = {
+      origin: "東京",
+      destination: "下呂温泉",
+      pass_point: "道の駅 ロック・ガーデンひちそう",
+      pass_at: "2999-01-01T13:12:00+09:00",
+      pickup_candidates: [],
+      total_duration_minutes: 312,
+      total_distance_meters: 371000,
+    };
+    const fetchMock = vi.fn(async () => jsonResponse(200, apiResult));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadClient({ VITE_DEMO_MODE: "true", VITE_API_BASE_URL: "http://api.test" });
 
-    const result = await api.analyzeRoute({
-      origin: "名古屋駅",
+    const result = await api.analyzeRoute({ origin: "東京", destination: "下呂温泉", departure_at: departure });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe("http://api.test/routes/analyze");
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+      origin: "東京",
       destination: "下呂温泉",
       departure_at: departure,
     });
-
-    expect(result.pass_point).toBe("道の駅 ロック・ガーデンひちそう");
-    expect(result.pass_at).toBe(new Date(Date.parse(departure) + 60 * 60000).toISOString());
-    expect(result.pickup_candidates).toEqual([
-      {
-        name: result.pass_point,
-        lat: null,
-        lng: null,
-        pass_at: result.pass_at,
-        distance_from_route_meters: 0,
-      },
-    ]);
-    // DEMOは実在地点の座標を持たない(未確認の座標を使わない)。
-    expect(result.pass_point_lat).toBeNull();
-    expect(result.pass_point_lng).toBeNull();
+    expect(result).toEqual(apiResult);
   });
 
-  it("DEMO_MODE accepts origin_location without breaking", async () => {
+  it("DEMO_MODE surfaces route analysis errors instead of falling back to fixed values", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse(503, { detail: "Route analysis is not available" })),
+    );
+    const api = await loadClient({ VITE_DEMO_MODE: "true", VITE_API_BASE_URL: "http://api.test" });
+
+    const error = await rejectionOf(
+      api.analyzeRoute({ origin: "東京", destination: "下呂温泉", departure_at: departure }),
+    );
+
+    expect(error.status).toBe(503);
+  });
+
+  it("DEMO_MODE shows a configuration message (not a network error) when VITE_API_BASE_URL is missing", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
     const api = await loadClient({ VITE_DEMO_MODE: "true", VITE_API_BASE_URL: "" });
 
-    const result = await api.analyzeRoute({
-      origin: "現在地",
-      destination: "下呂温泉",
-      departure_at: departure,
-      origin_location: { lat: 35.17, lng: 136.88 },
-    });
+    const error = await rejectionOf(
+      api.analyzeRoute({ origin: "東京", destination: "下呂温泉", departure_at: departure }),
+    );
 
-    expect(result.pickup_candidates).toHaveLength(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(toUserMessage(error, { fallback: "ルートの検索に失敗しました。" })).toBe(
+      "APIの接続先が設定されていません。管理者に確認してください。",
+    );
   });
 
   async function sentBody(args) {
