@@ -16,6 +16,7 @@ from models import (
     QRVerifyResponse,
     ReservationCreate,
     ReservationCreateResponse,
+    ReservationDetailResponse,
     ReservationResponse,
     RouteAnalysisRequest,
     RouteAnalysisResponse,
@@ -550,7 +551,7 @@ def create_reservation(reservation: ReservationCreate):
         raise reservation_error(exc) from exc
 
 
-@app.get("/reservations/{reservation_id}", response_model=ReservationResponse)
+@app.get("/reservations/{reservation_id}", response_model=ReservationDetailResponse)
 def get_reservation(
     reservation_id: str,
     x_reservation_token: str | None = Header(default=None, alias="X-Reservation-Token"),
@@ -566,7 +567,13 @@ def get_reservation(
         response = (
             get_supabase()
             .table("reservations")
-            .select("*")
+            # service-role経由の予約照会なので、公開一覧から外れたinactive商品も
+            # FKリレーションで取得できる。FrontendへはReservationItemで宣言した
+            # 表示用フィールドだけを返し、is_active等は露出させない。
+            .select(
+                "*,item:items(id,title,location_name,"
+                "pickup_available_from,pickup_available_to)"
+            )
             .eq("id", reservation_id)
             .eq("access_token", x_reservation_token)
             .limit(1)

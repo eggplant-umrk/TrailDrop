@@ -120,6 +120,16 @@ class ReservationCreate(BaseModel):
         return self
 
 
+class ReservationItem(BaseModel):
+    """予約照会に必要な、公開状態に左右されない最小の商品情報。"""
+
+    id: UUID
+    title: str
+    location_name: str
+    pickup_available_from: time | None = None
+    pickup_available_to: time | None = None
+
+
 class ReservationResponse(BaseModel):
     id: UUID
     item_id: UUID
@@ -139,6 +149,14 @@ class ReservationResponse(BaseModel):
     # 以前の既存予約、またはRouteTestを経由しない予約)。
     pickup_window_start: datetime | None = None
     pickup_window_end: datetime | None = None
+
+
+class ReservationDetailResponse(ReservationResponse):
+    # 予約済み商品の表示にGET /itemsを使うと、後からinactiveになった商品を
+    # 表示できない。予約へのアクセス権を確認した同じレスポンスに、必要最小限
+    # の商品情報だけを含める。予約作成・キャンセル・QR verifyの既存レスポンス
+    # にはこのフィールドを追加せず、今回の変更を予約照会APIだけに限定する。
+    item: ReservationItem | None = None
 
 
 class ReservationCreateResponse(ReservationResponse):

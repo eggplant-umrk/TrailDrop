@@ -130,28 +130,12 @@ export default function ReservationComplete() {
   // この端末(localStorage)にaccess_tokenを保存できているか。保存できて
   // いない場合は、タブを閉じるとQRを再表示できなくなる旨を案内する。
   const [persisted, setPersisted] = useState(() => isAccessTokenPersisted(id));
-  // 更新ボタンを押すたびに増やす。商品名取得effectの依存に含めることで、
-  // item_idが変わっていなくても更新のたびに商品名を取り直せるようにする
-  // (初回取得が失敗していた場合の再試行手段)。
-  const [itemReloadKey, setItemReloadKey] = useState(0);
-
   // キャンセルはpendingの予約にのみ表示する破壊的な操作なので、誤操作を
   // 防ぐためワンクッション(確認表示)を挟む。失敗しても表示中の予約情報は
   // そのまま残し、更新(refreshError)とは別にエラーを表示する。
   const [cancelConfirming, setCancelConfirming] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [cancelError, setCancelError] = useState(null);
-
-  // 商品名は予約情報の表示とは独立して取得する。取得中・失敗のいずれでも
-  // 予約情報・status・QRの表示は妨げない。取得できない場合は推測で補わず
-  // 「取得できませんでした」と表示する。
-  const [itemTitle, setItemTitle] = useState(null);
-  const [itemTitleError, setItemTitleError] = useState(false);
-  // 商品自体の営業時間(一括修正U2)。itemTitleと同じ取得ライフサイクルで
-  // 一緒に埋める。
-  const [itemPickupHours, setItemPickupHours] = useState(null);
-  // 商品の受取場所。RouteTestを経由しない予約の受取地点表示に使う。
-  const [itemLocation, setItemLocation] = useState(null);
 
   const mountedRef = useRef(true);
   useEffect(() => {
@@ -254,7 +238,9 @@ export default function ReservationComplete() {
       // status更新はBackend(cancel_reservation_with_stock RPC)からの応答を
       // そのまま反映する。在庫返却もそのRPC内で同時に行われている前提で、
       // Frontend側では在庫に関する処理を一切行わない。
-      setReservation(res);
+      // cancel APIの既存レスポンスにはitemが含まれないため、予約照会で取得済み
+      // の商品情報を保持する。キャンセル・在庫返却の処理自体は変更しない。
+      setReservation((current) => ({ ...res, item: res.item ?? current?.item ?? null }));
       // キャンセル完了時点でaccess_tokenはもう不要(一括修正m1)。
       clearAccessToken(id);
       saveFinalizedStatus(id, res.status);
@@ -268,47 +254,6 @@ export default function ReservationComplete() {
       setCancelling(false);
     }
   }
-
-  // 予約のitem_idが分かった時点で商品名を取得する。予約の再取得(初回・更新)
-  // とは別のライフサイクルで動くため、商品名取得の成否が予約表示の
-  // loading/エラー状態に影響しない。itemReloadKeyを依存に含めることで、
-  // item_idが変わらない更新操作でも商品名を取り直せる(初回取得の失敗を
-  // 更新ボタンでリトライできるようにするため)。
-  useEffect(() => {
-    if (!reservation?.item_id) return;
-    let mounted = true;
-    setItemTitle(null);
-    setItemTitleError(false);
-    setItemPickupHours(null);
-    setItemLocation(null);
-
-    async function loadItemTitle() {
-      try {
-        const items = await api.getItems();
-        const found = (items || []).find((it) => String(it.id) === String(reservation.item_id));
-        if (mounted) {
-          setItemTitle(found?.title || null);
-          setItemTitleError(!found?.title);
-          setItemLocation(found?.location_name || null);
-          setItemPickupHours(
-            found?.pickup_available_from && found?.pickup_available_to
-              ? { from: found.pickup_available_from, to: found.pickup_available_to }
-              : null,
-          );
-        }
-      } catch (e) {
-        if (mounted) {
-          setItemTitle(null);
-          setItemTitleError(true);
-        }
-      }
-    }
-
-    loadItemTitle();
-    return () => {
-      mounted = false;
-    };
-  }, [reservation?.item_id, itemReloadKey]);
 
   // RouteTest経由で予約した場合のみ、Google Maps引き継ぎに使う経路情報を持つ。
   // ItemListから直接予約した場合や、stateを保持しないリロード直後は
@@ -372,6 +317,15 @@ export default function ReservationComplete() {
 
   const statusDisplay = STATUS_DISPLAY[reservation.status] || UNKNOWN_STATUS_DISPLAY;
   const isPending = reservation.status === "pending";
+  const itemTitle = reservation.item?.title || null;
+  const itemLocation = reservation.item?.location_name || null;
+  const itemPickupHours =
+    reservation.item?.pickup_available_from && reservation.item?.pickup_available_to
+      ? {
+          from: reservation.item.pickup_available_from,
+          to: reservation.item.pickup_available_to,
+        }
+      : null;
   // PMレビューMAJOR M1: completed/cancelledはaccess_tokenを既に削除済み
   // (このタブのstateにまだ残っていれば直近の更新自体は成功し得るが、
   // 最終状態はこれ以上変わらないため再取得する意味が無い)。押せてしまうと
@@ -396,9 +350,7 @@ export default function ReservationComplete() {
     {
       label: "商品",
       value: itemTitle || (
-        <span className="text-gray-500">
-          {itemTitleError ? "商品情報を取得できませんでした" : "読み込み中…"}
-        </span>
+        <span className="text-gray-500">商品情報を取得できませんでした</span>
       ),
     },
     { label: "氏名", value: reservation.user_name },
@@ -541,7 +493,6 @@ export default function ReservationComplete() {
           type="button"
           onClick={() => {
             fetchReservation({ isInitial: false });
-            setItemReloadKey((count) => count + 1);
           }}
           disabled={refreshing || cancelling || cancelConfirming}
           aria-busy={refreshing}
