@@ -13,6 +13,9 @@ const ROUTE_ANALYSIS_TIMEOUT_MS = 18000;
 const TIMEOUT_ERROR_MESSAGE =
   "通信がタイムアウトしました。結果が不明なため、内容を確認してから再試行してください。";
 
+const API_BASE_URL_MISSING_MESSAGE =
+  "APIの接続先が設定されていません。管理者に確認してください。";
+
 // main.pyのVALID_PAYMENT_METHODSと合わせる。実決済は行わないモック決済。
 const VALID_PAYMENT_METHODS = new Set(["paypay", "credit_card"]);
 
@@ -41,7 +44,11 @@ async function request(path, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
   const url = BASE ? `${BASE}${path}` : null;
 
   if (!url) {
-    throw new Error("VITE_API_BASE_URL is not configured");
+    // statusが無いErrorは通信失敗扱い(「通信環境を確認」)になり、設定不足と
+    // 気づけないため、設定不足と分かる日本語の利用者向け文言を付ける。
+    const configError = new Error("VITE_API_BASE_URL is not configured");
+    configError.userMessage = API_BASE_URL_MISSING_MESSAGE;
+    throw configError;
   }
 
   const controller = new AbortController();

@@ -171,6 +171,21 @@ describe("analyzeRoute pickup candidates", () => {
     expect(error.status).toBe(503);
   });
 
+  it("DEMO_MODE shows a configuration message (not a network error) when VITE_API_BASE_URL is missing", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadClient({ VITE_DEMO_MODE: "true", VITE_API_BASE_URL: "" });
+
+    const error = await rejectionOf(
+      api.analyzeRoute({ origin: "東京", destination: "下呂温泉", departure_at: departure }),
+    );
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(toUserMessage(error, { fallback: "ルートの検索に失敗しました。" })).toBe(
+      "APIの接続先が設定されていません。管理者に確認してください。",
+    );
+  });
+
   async function sentBody(args) {
     const fetchMock = vi.fn(async () =>
       jsonResponse(200, { pass_point: null, pass_at: null, pickup_candidates: [] }),
