@@ -12,7 +12,7 @@ import {
 } from "../utils/reservationAccess";
 import { loadRouteContext } from "../utils/routeContext";
 import { toUserMessage } from "../utils/errorMessages";
-import { buildGoogleMapsPlaceUrl, buildGoogleMapsUrl } from "../utils/googleMaps";
+import { buildGoogleMapsPlaceUrl, buildGoogleMapsUrl, isManualOrigin } from "../utils/googleMaps";
 import { formatPickupHours } from "../utils/pickupHours";
 import { AppLayout, primaryButtonClass, secondaryButtonClass } from "../components/ui";
 
@@ -431,9 +431,11 @@ export default function ReservationComplete() {
             Google Mapsで向かう
           </a>
           <p className="mt-1 text-center text-xs text-gray-500">
-            {routeContext
-              ? "現在地から、受取地点を経由して目的地へのルートを開きます"
-              : "受取地点をGoogle Mapsで開きます"}
+            {!routeContext
+              ? "受取地点をGoogle Mapsで開きます"
+              : isManualOrigin(routeContext.origin)
+                ? "出発地から、受取地点を経由して目的地へのルートを開きます"
+                : "現在地から、受取地点を経由して目的地へのルートを開きます"}
           </p>
         </div>
       )}

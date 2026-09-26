@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildGoogleMapsPlaceUrl, buildGoogleMapsUrl } from "./googleMaps";
+import { CURRENT_LOCATION_LABEL, buildGoogleMapsPlaceUrl, buildGoogleMapsUrl } from "./googleMaps";
 
 function paramsOf(url) {
   const parsed = new URL(url);
@@ -44,10 +44,26 @@ describe("buildGoogleMapsUrl", () => {
     expect(params.waypoints).toBe("道の駅A");
   });
 
-  it("never includes an origin, so Google Maps starts from the device's current location", () => {
-    const params = paramsOf(buildGoogleMapsUrl({ destination: "下呂温泉", passPoint: "道の駅A" }));
-    expect(params).not.toHaveProperty("origin");
+  it.each(["東京", "名古屋"])("uses a manually entered origin (%s): origin → pickup → destination", (origin) => {
+    const params = paramsOf(
+      buildGoogleMapsUrl({ origin, destination: "下呂温泉", passPoint: "道の駅A" }),
+    );
+    expect(params).toEqual({
+      api: "1",
+      origin,
+      destination: "下呂温泉",
+      waypoints: "道の駅A",
+      travelmode: "driving",
+    });
   });
+
+  it.each([CURRENT_LOCATION_LABEL, " 現在地 ", "", "   ", undefined, null])(
+    "omits origin for the current location or a missing origin (%j), so Google Maps starts from the device",
+    (origin) => {
+      const params = paramsOf(buildGoogleMapsUrl({ origin, destination: "下呂温泉", passPoint: "道の駅A" }));
+      expect(params).not.toHaveProperty("origin");
+    },
+  );
 });
 
 describe("buildGoogleMapsPlaceUrl", () => {
