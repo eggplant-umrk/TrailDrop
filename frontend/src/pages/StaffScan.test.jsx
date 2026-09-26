@@ -121,6 +121,48 @@ describe("StaffScan", () => {
     expect(container.textContent).toContain("展示テスト太郎 さん");
   });
 
+  it("returns to scanning for the next customer after a pickup, keeping the staff token", async () => {
+    apiMocks.verifyQr.mockResolvedValue({
+      id: "22222222-2222-4222-8222-222222222222",
+      user_name: "展示テスト太郎",
+      status: "completed",
+    });
+    apiMocks.getStaffReservation.mockResolvedValue({
+      id: "22222222-2222-4222-8222-222222222222",
+      item_title: "鮎の甘露煮の燻製 100gパック",
+      user_name: "展示テスト太郎",
+      status: "completed",
+    });
+    await act(async () => root.render(<StaffScan />));
+    await enterStaffToken();
+    await act(async () => {
+      container.querySelector('[data-testid="mock-scanner"]').click();
+    });
+    expect(container.textContent).toContain("受取完了");
+
+    await act(async () => {
+      buttonByText("次の方の受け取りへ").click();
+    });
+
+    expect(container.querySelector('[data-testid="mock-scanner"]')).not.toBeNull();
+    expect(container.textContent).toContain("受取QRコードをかざしてください");
+    expect(container.textContent).not.toContain("受取完了");
+    expect(container.textContent).not.toContain("鮎の甘露煮の燻製 100gパック");
+    expect(container.textContent).not.toContain("展示テスト太郎");
+    expect(container.querySelector('input[type="password"]')).toBeNull();
+    expect(sessionStorage.getItem("traildrop_staff_token")).toBe("staff-secret");
+
+    // 次のお客様のQRも同じスタッフ認証で確認できる。
+    await act(async () => {
+      container.querySelector('[data-testid="mock-scanner"]').click();
+    });
+    expect(apiMocks.verifyQr).toHaveBeenCalledTimes(2);
+    expect(apiMocks.verifyQr).toHaveBeenLastCalledWith(
+      "11111111-1111-4111-8111-111111111111",
+      "staff-secret",
+    );
+  });
+
   it("uses an existing session token and opens directly in scan mode", async () => {
     sessionStorage.setItem("traildrop_staff_token", "saved-staff-secret");
 

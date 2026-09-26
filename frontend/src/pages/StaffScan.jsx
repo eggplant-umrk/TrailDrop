@@ -202,6 +202,13 @@ export default function StaffScan() {
             </p>
             <p className="mt-3 text-lg text-gray-700">{result?.userName} さん</p>
             <p className="mt-8 text-lg">受け取りありがとうございました</p>
+            <button
+              type="button"
+              onClick={restartScan}
+              className="mt-8 min-h-12 rounded bg-[#2f6f3e] px-8 py-3 font-semibold text-white"
+            >
+              次の方の受け取りへ
+            </button>
           </section>
         )}
 
