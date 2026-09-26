@@ -345,6 +345,15 @@ export default function ReservationComplete() {
       <AppLayout step={4}>
         <p className="mb-3 pt-2 text-red-600">{initialError}</p>
         <div className="space-y-2">
+          {/* 初回表示と同じ取得処理をもう一度実行する。実行中はinitialLoadingで
+              「読み込み中…」表示に切り替わるため、このボタンは連打できない。 */}
+          <button
+            type="button"
+            onClick={() => fetchReservation({ isInitial: true })}
+            className={secondaryButtonClass}
+          >
+            再試行
+          </button>
           <button type="button" onClick={() => navigate("/")} className={primaryButtonClass}>
             トップへ戻る
           </button>
