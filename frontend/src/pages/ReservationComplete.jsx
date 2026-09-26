@@ -72,12 +72,12 @@ const PAYMENT_METHOD_LABELS = {
 const STATUS_DISPLAY = {
   pending: {
     heading: "予約完了",
-    description: "受取時にこのQRコードをスタッフに見せてください。",
+    description: "受取時に、このQRコードを受取ロッカーの読み取り端末にかざしてください。",
     className: "bg-[#eef6ec] text-[#2f6f3e]",
   },
   completed: {
     heading: "受取済み",
-    description: "この予約はスタッフによる受取確認が完了しています。",
+    description: "この予約は受取確認が完了しています。",
     className: "bg-blue-50 text-blue-800",
   },
   cancelled: {

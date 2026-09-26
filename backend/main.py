@@ -270,6 +270,60 @@ def enforce_route_analysis_rate_limit(client_ip: str) -> None:
         _route_analysis_request_log[client_ip] = recent
 
 
+# 一般利用者の予約作成(POST /reservations)のIP単位レート制限。ルート分析と
+# 同じインメモリのスライディングウィンドウ方式(単一プロセス前提)。APIを
+# 連打して在庫を消費し尽くされるのを遅らせるためのもので、認証の代わりでは
+# ない。通常の予約はルート検索(1分10回まで)の後に行うため、その2倍にして
+# 同じNAT配下(会場Wi-Fi等)の複数人による正常な連続予約では引っかからない
+# ようにする。
+RESERVATION_CREATE_RATE_LIMIT = 20
+RESERVATION_CREATE_RATE_WINDOW_SECONDS = 60.0
+RESERVATION_CREATE_RATE_LIMIT_CLEANUP_INTERVAL_SECONDS = RESERVATION_CREATE_RATE_WINDOW_SECONDS
+_reservation_create_rate_lock = threading.Lock()
+_reservation_create_request_log: dict[str, list[float]] = {}
+_reservation_create_rate_limit_last_cleanup = 0.0
+
+
+def _cleanup_reservation_create_rate_limit_locked(now: float) -> None:
+    """呼び出し元で_reservation_create_rate_lockを保持している前提の内部関数。
+    ウィンドウ内に有効なリクエストが1件もないIPのエントリを削除する。
+    """
+
+    global _reservation_create_rate_limit_last_cleanup
+    if (
+        now - _reservation_create_rate_limit_last_cleanup
+        < RESERVATION_CREATE_RATE_LIMIT_CLEANUP_INTERVAL_SECONDS
+    ):
+        return
+    window_start = now - RESERVATION_CREATE_RATE_WINDOW_SECONDS
+    stale_ips = [
+        ip
+        for ip, timestamps in _reservation_create_request_log.items()
+        if not any(t > window_start for t in timestamps)
+    ]
+    for ip in stale_ips:
+        del _reservation_create_request_log[ip]
+    _reservation_create_rate_limit_last_cleanup = now
+
+
+def enforce_reservation_create_rate_limit(client_ip: str) -> None:
+    now = time.monotonic()
+    window_start = now - RESERVATION_CREATE_RATE_WINDOW_SECONDS
+    with _reservation_create_rate_lock:
+        _cleanup_reservation_create_rate_limit_locked(now)
+        recent = [
+            t for t in _reservation_create_request_log.get(client_ip, []) if t > window_start
+        ]
+        if len(recent) >= RESERVATION_CREATE_RATE_LIMIT:
+            _reservation_create_request_log[client_ip] = recent
+            raise HTTPException(
+                status_code=429,
+                detail="Too many reservation requests. Please try again later.",
+            )
+        recent.append(now)
+        _reservation_create_request_log[client_ip] = recent
+
+
 # 受取地点の選び方。fixed(既定・rollback用)は従来どおり七宗の固定地点を
 # 強制経由する。routeは利用者の実際の経路からpickup_locationsの候補を選ぶ
 # (route_analysis.py参照)。不明な値は安全側のfixedとして扱う。
@@ -455,6 +509,10 @@ def reservation_error(exc: Exception) -> HTTPException:
     # ため、ここに到達するのはRPCを直接叩いた場合などの想定外経路のみ。
     if "INVALID_PAYMENT_METHOD" in message:
         return HTTPException(status_code=400, detail="Invalid payment method")
+    # 同じidempotency_keyが別の商品の予約で使われた場合。同じ操作の再送では
+    # あり得ないため、作成済みの予約は返さず422にする。
+    if "IDEMPOTENCY_KEY_REUSED" in message:
+        return HTTPException(status_code=422, detail="Idempotency key was used for a different reservation")
     if code == "P0002" or "ITEM_NOT_FOUND" in message:
         return HTTPException(status_code=404, detail="Item not found")
     if code == "P0001" or "OUT_OF_STOCK" in message:
@@ -515,7 +573,8 @@ def list_items():
 
 
 @app.post("/reservations", response_model=ReservationCreateResponse, status_code=201)
-def create_reservation(reservation: ReservationCreate):
+def create_reservation(reservation: ReservationCreate, http_request: Request):
+    enforce_reservation_create_rate_limit(resolve_client_ip(http_request))
     # 未指定・不正な値のどちらも同じ400として扱う(PayPay/クレジットカード
     # のどちらかを必須選択、という仕様に対して一貫したエラーにするため)。
     if reservation.payment_method not in VALID_PAYMENT_METHODS:
@@ -543,6 +602,12 @@ def create_reservation(reservation: ReservationCreate):
                         reservation.pickup_window_end.isoformat()
                         if reservation.pickup_window_end is not None
                         else None
+                    ),
+                    # キーを送らない既存クライアントでは従来と同じ引数でRPCを呼ぶ。
+                    **(
+                        {"p_idempotency_key": str(reservation.idempotency_key)}
+                        if reservation.idempotency_key is not None
+                        else {}
                     ),
                 },
             )

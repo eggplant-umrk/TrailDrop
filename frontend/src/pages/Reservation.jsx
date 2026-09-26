@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useParams, useNavigate, useLocation } from "react-router-dom";
 import api from "../api/client";
 import { saveAccessToken } from "../utils/reservationAccess";
@@ -6,6 +6,7 @@ import { saveRouteContext } from "../utils/routeContext";
 import { isPickupWindowEnded, msUntilPickupWindowEnds } from "../utils/pickupWindow";
 import { toUserMessage } from "../utils/errorMessages";
 import { getShopName } from "../utils/shopNames";
+import { randomUuid } from "../utils/uuid";
 import ItemThumbnail from "../components/ItemThumbnail";
 import {
   AppLayout,
@@ -33,6 +34,7 @@ const CREATE_ERROR_BY_STATUS = {
   404: "この商品は見つかりませんでした。一覧から選び直してください。",
   409: "申し訳ありません。この商品は在庫切れになりました。",
   422: "入力内容が正しくありません。",
+  429: "予約の操作が集中しています。少し時間をおいて、もう一度お試しください。",
 };
 const CREATE_ERROR_FALLBACK = "予約に失敗しました。";
 
@@ -95,9 +97,12 @@ const PAYMENT_METHODS = [
 // される)、予約が作成されていないと確実に言える。それ以外の失敗
 // (ネットワーク断、5xx、応答のJSON解析失敗などでerr.statusが無い/
 // 想定外の値)は、リクエストがサーバーに届いた後で応答だけが失われた
-// 可能性を否定できないため、専用の警告文言にする(Idempotency-Keyは
-// 今回実装しないため、Frontend側で「確実に失敗した」と言い切れない)。
-const DEFINITELY_NOT_CREATED_STATUSES = new Set([400, 404, 409, 422]);
+// 可能性を否定できないため、専用の案内にする。429(レート制限)はBackendが
+// RPCを呼ぶ前に返すため、確実に作成されていない。
+// 予約操作ごとのidempotency key(下のdraft)を再送にも使うため、曖昧な失敗の
+// 後に同じ確認画面から再試行しても、作成済みなら同じ予約が返り二重予約には
+// ならない。
+const DEFINITELY_NOT_CREATED_STATUSES = new Set([400, 404, 409, 422, 429]);
 
 // 曖昧な失敗時(=DEFINITELY_NOT_CREATED_STATUSESに該当しない失敗)は、
 // 「予約状況を確認してください」という、実際にはFrontendから行えない操作を
@@ -108,6 +113,8 @@ const DEFINITELY_NOT_CREATED_STATUSES = new Set([400, 404, 409, 422]);
 // state自体はページ遷移(unmount)で失われるため、ブラウザの戻る操作で
 // 予約フォームに戻った際に入力内容を復元できるようsessionStorageにも
 // 一時保存する(予約作成成功時にclearDraftで消す)。
+// draftには予約操作のidempotencyKeyも持たせる。入力内容(と受取時間帯)が
+// 同じ間は同じキーを使い続け、変わったら新しい操作として別のキーにする。
 const DRAFT_KEY_PREFIX = "traildrop_reserve_draft_";
 
 function loadDraft(id) {
@@ -190,6 +197,9 @@ export default function Reservation() {
   // 表示する(「再試行すれば安全」と誤解させる表示にしないため)。
   const [ambiguousFailure, setAmbiguousFailure] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  // sessionStorageが使えない場合でも、この画面を開いている間の再送は同じ
+  // キーにするための控え。
+  const fallbackIdempotencyKeyRef = useRef(null);
   // 商品取得失敗時の「再試行」で増やす。下の商品取得effectの依存に含め、
   // 同じ取得処理をもう一度実行する。
   const [itemReloadKey, setItemReloadKey] = useState(0);
@@ -335,7 +345,22 @@ export default function Reservation() {
       return;
     }
     setFormError(null);
-    saveDraft(id, { name, date, paymentMethod });
+    const previousDraft = loadDraft(id);
+    const sameOperation =
+      previousDraft?.idempotencyKey &&
+      previousDraft.name === name &&
+      previousDraft.date === date &&
+      previousDraft.paymentMethod === paymentMethod &&
+      (previousDraft.pickupWindowStart ?? null) === (pickupWindowStart ?? null) &&
+      (previousDraft.pickupWindowEnd ?? null) === (pickupWindowEnd ?? null);
+    saveDraft(id, {
+      name,
+      date,
+      paymentMethod,
+      pickupWindowStart: pickupWindowStart ?? null,
+      pickupWindowEnd: pickupWindowEnd ?? null,
+      idempotencyKey: sameOperation ? previousDraft.idempotencyKey : randomUuid(),
+    });
     navigate(`/reserve/${id}/confirm`, {
       state: {
         // 入力画面から進んだ確認画面か(「入力内容を修正する」で履歴を1つ
@@ -374,6 +399,15 @@ export default function Reservation() {
     setSubmitting(true);
     setFormError(null);
     setAmbiguousFailure(false);
+    // 入力画面から来ていない(確認画面のURLを直接開いた等)・draftを保存
+    // できない場合は、ここで作ったキーをこの画面の間使い回す。
+    const draft = loadDraft(id);
+    let idempotencyKey = draft?.idempotencyKey;
+    if (!idempotencyKey) {
+      fallbackIdempotencyKeyRef.current ??= randomUuid();
+      idempotencyKey = fallbackIdempotencyKeyRef.current;
+      saveDraft(id, { ...(draft ?? { name, date, paymentMethod }), idempotencyKey });
+    }
     try {
       const requestedAt = item.requiresDate ? `${date}:00+09:00` : null;
       // 実際の外部決済は一切行わない。ここでの成功=モック決済成功として
@@ -386,6 +420,7 @@ export default function Reservation() {
         payment_method: paymentMethod,
         pickup_window_start: pickupWindowStart || null,
         pickup_window_end: pickupWindowEnd || null,
+        idempotency_key: idempotencyKey,
       });
       clearDraft(id);
       // access_tokenはタブ単位(sessionStorage)に加え、タブを閉じた後でも同じ
@@ -430,8 +465,8 @@ export default function Reservation() {
     } catch (e) {
       // エラー時も確認画面(/reserve/:id/confirm)は維持し、name/date/
       // paymentMethodのstateも一切触らない。入力し直さずそのまま
-      // 「支払いを確定する」を再度押せば再試行できる(ただし曖昧な失敗時は
-      // 二重予約の恐れを警告表示し、安易な再試行を促さない)。
+      // 「支払いを確定する」を再度押せば再試行できる(曖昧な失敗の後でも、
+      // 同じidempotency keyで送るため二重予約にはならない)。
       const definitelyNotCreated = DEFINITELY_NOT_CREATED_STATUSES.has(e?.status);
       setAmbiguousFailure(!definitelyNotCreated);
       setFormError(
@@ -702,10 +737,8 @@ export default function Reservation() {
           <ul className="mt-2 list-disc space-y-1 pl-5">
             <li>通信状況により、予約が作成されたかどうかをこの画面では判断できませんでした。</li>
             <li>
-              同じ内容でお支払いをすぐに再試行すると、二重に予約されるおそれがあります。むやみに再試行しないでください。
+              通信状況の良い場所で、もう一度「予約を確定する」を押してください。すでに予約が作成されていた場合は、その予約が表示されます（二重に予約・お支払いされることはありません）。
             </li>
-            <li>現時点では、この画面から予約状況をご自身で確認する機能はありません。</li>
-            <li>ご不安な場合は、受取窓口（{item.location}）で予約状況をご確認ください。</li>
           </ul>
         </div>
       )}

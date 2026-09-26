@@ -49,6 +49,10 @@ class ReservationCreate(BaseModel):
     # 設定できる。RouteTestを経由しない予約では両方Noneのまま。
     pickup_window_start: datetime | None = None
     pickup_window_end: datetime | None = None
+    # 予約操作ごとにFrontendが生成するキー。タイムアウト後の再送などで同じ
+    # キーが届いた場合、RPCは作成済みの予約をそのまま返す(在庫を二重に
+    # 減らさない)。未指定の場合は従来どおり毎回新しい予約を作る。
+    idempotency_key: UUID | None = None
 
     # Frontendは既にrequired属性で空文字を弾いているが、Backend側でも
     # trim・空白のみ・長すぎる値を422で拒否する(直接APIを叩いた場合の防御)。

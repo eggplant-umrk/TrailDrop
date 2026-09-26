@@ -26,3 +26,15 @@ def reset_staff_auth_rate_limit_state():
     yield
     main._staff_auth_failure_log.clear()
     main._staff_auth_rate_limit_last_cleanup = 0.0
+
+
+# Same reason as above for the reservation-create rate limiter: every
+# TestClient request comes from the same "testclient" IP, so the shared
+# in-memory log would otherwise leak across tests and start returning 429.
+@pytest.fixture(autouse=True)
+def reset_reservation_create_rate_limit_state():
+    main._reservation_create_request_log.clear()
+    main._reservation_create_rate_limit_last_cleanup = 0.0
+    yield
+    main._reservation_create_request_log.clear()
+    main._reservation_create_rate_limit_last_cleanup = 0.0

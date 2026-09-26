@@ -126,7 +126,10 @@ export default function StaffScan() {
             className="mx-auto mt-10 w-full max-w-md space-y-5 rounded-md border border-[#dce9da] bg-white p-6 shadow-sm"
           >
             <label className="block">
-              <span className="text-sm font-medium">スタッフ認証</span>
+              <span className="text-sm font-medium">スタッフトークン</span>
+              <span className="mt-1 block text-xs text-gray-600">
+                受取確認画面（/staff/verify）と同じスタッフトークンを入力してください。入力はこの端末の準備時に1回だけです。
+              </span>
               <input
                 type="password"
                 value={tokenInput}

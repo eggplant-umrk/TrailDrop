@@ -397,3 +397,61 @@ describe("request() error objects", () => {
     }
   });
 });
+
+describe("createReservation idempotency", () => {
+  const KEY = "33333333-3333-4333-8333-333333333333";
+  const DEMO_ITEM = "a1111111-1111-4111-8111-111111111111";
+
+  it("sends idempotency_key to the Backend when given", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse(201, { id: "r1" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadClient({ VITE_DEMO_MODE: "false", VITE_API_BASE_URL: "http://api.test" });
+
+    await api.createReservation({
+      item_id: "i1",
+      user_name: "u",
+      payment_method: "paypay",
+      idempotency_key: KEY,
+    });
+
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).idempotency_key).toBe(KEY);
+  });
+
+  it("omits idempotency_key when not given (previous request body)", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse(201, { id: "r1" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = await loadClient({ VITE_DEMO_MODE: "false", VITE_API_BASE_URL: "http://api.test" });
+
+    await api.createReservation({ item_id: "i1", user_name: "u", payment_method: "paypay" });
+
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).not.toHaveProperty("idempotency_key");
+  });
+
+  it("DEMO_MODE returns the same reservation for the same key without taking stock twice", async () => {
+    localStorage.clear();
+    const api = await loadClient({ VITE_DEMO_MODE: "true", VITE_API_BASE_URL: "" });
+    const stockOf = async () => (await api.getItems()).find((item) => item.id === DEMO_ITEM).stock;
+    const before = await stockOf();
+    const args = { item_id: DEMO_ITEM, user_name: "u", payment_method: "paypay", idempotency_key: KEY };
+
+    const first = await api.createReservation(args);
+    const second = await api.createReservation(args);
+
+    expect(second).toEqual(first);
+    expect(second).not.toHaveProperty("idempotency_key");
+    expect(await stockOf()).toBe(before - 1);
+  });
+
+  it("DEMO_MODE rejects a key reused for another item with 422", async () => {
+    localStorage.clear();
+    const api = await loadClient({ VITE_DEMO_MODE: "true", VITE_API_BASE_URL: "" });
+    const other = (await api.getItems()).find((item) => item.id !== DEMO_ITEM && item.stock > 0);
+    await api.createReservation({ item_id: DEMO_ITEM, user_name: "u", payment_method: "paypay", idempotency_key: KEY });
+
+    const error = await rejectionOf(
+      api.createReservation({ item_id: other.id, user_name: "u", payment_method: "paypay", idempotency_key: KEY }),
+    );
+
+    expect(error.status).toBe(422);
+  });
+});
