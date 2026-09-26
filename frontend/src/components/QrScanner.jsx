@@ -91,8 +91,14 @@ async function createDetector() {
   return createJsQrDetector();
 }
 
-export default function QrScanner({ onDetected, onCancel, showManualEntryHint = true }) {
+export default function QrScanner({
+  onDetected,
+  onCancel,
+  showManualEntryHint = true,
+  displaySize = "default",
+}) {
   const videoRef = useRef(null);
+  const isLargeDisplay = displaySize === "large";
   const [status, setStatus] = useState("starting"); // starting | scanning | error
   const [errorMessage, setErrorMessage] = useState("");
   // UUID形式でない値を読み取った際に一時的に表示する案内。
@@ -199,7 +205,11 @@ export default function QrScanner({ onDetected, onCancel, showManualEntryHint = 
   }, []);
 
   return (
-    <div className="space-y-3 rounded-md border border-gray-200 p-3">
+    <div
+      className={`rounded-md border border-gray-200 bg-white ${
+        isLargeDisplay ? "space-y-5 p-4 sm:p-5" : "space-y-3 p-3"
+      }`}
+    >
       {status === "error" ? (
         <p className="text-sm text-red-600" role="alert">
           {errorMessage}
@@ -211,7 +221,11 @@ export default function QrScanner({ onDetected, onCancel, showManualEntryHint = 
         </p>
       ) : (
         <>
-          <div className="relative mx-auto aspect-square w-full max-w-xs overflow-hidden rounded bg-black">
+          <div
+            className={`relative mx-auto aspect-square w-full overflow-hidden rounded bg-black ${
+              isLargeDisplay ? "max-w-[min(640px,60vh)]" : "max-w-xs"
+            }`}
+          >
             <video
               ref={videoRef}
               className="h-full w-full object-cover"
@@ -221,10 +235,17 @@ export default function QrScanner({ onDetected, onCancel, showManualEntryHint = 
             />
             <div
               aria-hidden="true"
-              className="pointer-events-none absolute inset-[15%] rounded-md border-4 border-white/90"
+              className={`pointer-events-none absolute inset-[15%] rounded-md border-white/90 ${
+                isLargeDisplay ? "border-[6px]" : "border-4"
+              }`}
             />
           </div>
-          <p className="text-center text-sm font-medium" aria-live="polite">
+          <p
+            className={`text-center font-medium ${
+              isLargeDisplay ? "text-lg sm:text-2xl" : "text-sm"
+            }`}
+            aria-live="polite"
+          >
             {status === "starting"
               ? "カメラを起動しています…"
               : invalidHint
@@ -236,7 +257,11 @@ export default function QrScanner({ onDetected, onCancel, showManualEntryHint = 
       <button
         type="button"
         onClick={onCancel}
-        className="w-full rounded border border-gray-300 bg-white px-4 py-2 font-medium text-gray-700"
+        className={`rounded border border-gray-300 bg-white font-medium text-gray-700 ${
+          isLargeDisplay
+            ? "mx-auto block min-h-11 w-full max-w-xs px-4 py-2 text-sm"
+            : "w-full px-4 py-2"
+        }`}
       >
         {status === "error" ? "閉じる" : "キャンセル"}
       </button>
