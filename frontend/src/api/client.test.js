@@ -39,7 +39,7 @@ afterEach(() => {
 describe("getReservation error contract (DEMO_MODE matches the real API)", () => {
   async function createDemoReservation(api) {
     return api.createReservation({
-      item_id: "wood-001",
+      item_id: "a1111111-1111-4111-8111-111111111111",
       user_name: "テスト太郎",
       payment_method: "paypay",
     });
@@ -54,8 +54,8 @@ describe("getReservation error contract (DEMO_MODE matches the real API)", () =>
     expect(fetched.id).toBe(created.id);
     expect(fetched).not.toHaveProperty("access_token");
     expect(fetched.item).toEqual({
-      id: "wood-001",
-      title: "間伐材の薪（小）",
+      id: "a1111111-1111-4111-8111-111111111111",
+      title: "鮎の甘露煮の燻製 100gパック",
       location_name: "道の駅 ロック・ガーデンひちそう",
       pickup_available_from: "07:00:00",
       pickup_available_to: "21:00:00",
@@ -97,6 +97,34 @@ describe("getReservation error contract (DEMO_MODE matches the real API)", () =>
 
     expect(error.status).toBe(404);
     expect(error.message).toBe("Reservation not found");
+  });
+});
+
+describe("DEMO_MODE product master", () => {
+  it("returns only the five DB-aligned active pickup products", async () => {
+    const api = await loadClient({ VITE_DEMO_MODE: "true", VITE_API_BASE_URL: "" });
+
+    const items = await api.getItems();
+
+    expect(items).toHaveLength(5);
+    expect(items.map((item) => item.id)).toEqual([
+      "a1111111-1111-4111-8111-111111111111",
+      "a2222222-2222-4222-8222-222222222222",
+      "a3333333-3333-4333-8333-333333333333",
+      "a4444444-4444-4444-8444-444444444444",
+      "a5555555-5555-4555-8555-555555555555",
+    ]);
+    expect(items.every((item) => item.type === "pickup")).toBe(true);
+    expect(items.every((item) => item.is_active === true)).toBe(true);
+    expect(items.every((item) => item.pickup_available_from === "07:00:00")).toBe(true);
+    expect(items.every((item) => item.pickup_available_to === "21:00:00")).toBe(true);
+    expect(items.map((item) => item.title)).toEqual([
+      "鮎の甘露煮の燻製 100gパック",
+      "若鶏の皮肝けいちゃん 200g×2袋",
+      "東濃ひのき薪 20kg×1箱 皮つき",
+      "出来立てくんたま（3個入×5袋）通常パック",
+      "菊泉本舗 特選 お茶せんべい 26枚入り",
+    ]);
   });
 });
 

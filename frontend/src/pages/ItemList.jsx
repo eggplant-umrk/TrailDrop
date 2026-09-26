@@ -8,19 +8,26 @@ import {
   secondaryButtonClass,
   StockLabel,
 } from "../components/ui";
+import ItemThumbnail from "../components/ItemThumbnail";
 import { toUserMessage } from "../utils/errorMessages";
 import { formatPickupHours } from "../utils/pickupHours";
+import { getShopName } from "../utils/shopNames";
 
-function mapItem(serverItem) {
+export function mapItem(serverItem) {
   return {
     id: serverItem.id,
     type: serverItem.type,
-    name: serverItem.title,
+    title: serverItem.title,
     price: serverItem.price,
     stock: serverItem.stock,
-    location: serverItem.location_name,
-    pickupAvailableFrom: serverItem.pickup_available_from,
-    pickupAvailableTo: serverItem.pickup_available_to,
+    location_name: serverItem.location_name,
+    pickup_available_from: serverItem.pickup_available_from,
+    pickup_available_to: serverItem.pickup_available_to,
+    shop_id: serverItem.shop_id,
+    description: serverItem.description,
+    category: serverItem.category,
+    content_amount: serverItem.content_amount,
+    price_note: serverItem.price_note,
   };
 }
 
@@ -85,51 +92,76 @@ export default function ItemList() {
       {!loading && !error && items.length === 0 && <div className="p-3">現在取り扱いはありません。</div>}
 
       <ul className="space-y-3">
-        {items.map((it) => (
-          <li key={it.id} className="rounded-xl bg-white p-4 shadow-sm">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <p className="font-semibold">
-                  {it.name}
-                  {it.type === "experience" && (
-                    <span className="ml-2 text-xs font-normal text-gray-500">体験</span>
+        {items.map((it) => {
+          const shopName = getShopName(it.shop_id);
+          return (
+            <li key={it.id} className="overflow-hidden rounded-xl bg-white p-4 shadow-sm">
+              <div className="flex items-start gap-3">
+                <ItemThumbnail itemId={it.id} title={it.title} size="large" />
+                <div className="min-w-0 flex-1">
+                  {it.category && (
+                    <span className="inline-flex rounded bg-[#eef6ec] px-2 py-0.5 text-xs font-medium text-[#2f6f3e]">
+                      {it.category}
+                    </span>
                   )}
+                  <h2 className="mt-1 break-words text-base font-bold leading-snug">
+                    {it.title}
+                  </h2>
+                  <p className="mt-1 break-words text-xs text-gray-600">
+                    提供：{shopName || "提供元情報なし"}
+                  </p>
+                  {it.content_amount && (
+                    <p className="mt-1 text-xs text-gray-500">内容量：{it.content_amount}</p>
+                  )}
+                </div>
+              </div>
+
+              {it.description && (
+                <p className="mt-3 line-clamp-3 break-words text-sm leading-relaxed text-gray-700">
+                  {it.description}
                 </p>
-                <p className="mt-1 text-xs text-gray-600">{it.location}</p>
+              )}
+
+              <div className="mt-3 flex items-end justify-between gap-3 border-t border-gray-100 pt-3">
+                <div>
+                  <p className="text-xl font-bold text-[#16381b]">{formatYen(it.price)}</p>
+                  {it.price_note && <p className="mt-0.5 text-[11px] text-gray-500">※デモ用設定価格</p>}
+                </div>
+                <StockLabel stock={it.stock} />
+              </div>
+
+              <div className="mt-3 space-y-1 rounded-lg bg-gray-50 p-3 text-xs text-gray-600">
+                <p className="break-words">受取場所：{it.location_name}</p>
                 {/* 商品自体の営業時間(RouteTest.jsx/StaffVerify.jsxと同じ表示)。
-                    未設定(主に体験)の商品では表示しない(一括修正U2)。 */}
-                {it.pickupAvailableFrom && it.pickupAvailableTo && (
-                  <p className="mt-1 text-xs text-gray-600">
-                    営業時間{" "}
+                    未設定の商品では表示しない。 */}
+                {it.pickup_available_from && it.pickup_available_to && (
+                  <p>
+                    受取可能時間：{" "}
                     <span className="whitespace-nowrap">
-                      {formatPickupHours(it.pickupAvailableFrom)}〜{formatPickupHours(it.pickupAvailableTo)}
+                      {formatPickupHours(it.pickup_available_from)}〜
+                      {formatPickupHours(it.pickup_available_to)}
                     </span>
                   </p>
                 )}
               </div>
-              <div className="shrink-0 text-right">
-                <p className="text-lg font-bold">{formatYen(it.price)}</p>
-                <p className="mt-0.5">
-                  <StockLabel stock={it.stock} />
-                </p>
-              </div>
-            </div>
-            {it.stock > 0 ? (
-              <Link to={`/reserve/${it.id}`} className={`${primaryButtonClass} mt-3`}>
-                予約する
-              </Link>
-            ) : (
-              // 在庫0はクリックして409を待たせず、その場で予約不可と
-              // 分かるようにする(一括修正m2)。
-              <span
-                aria-disabled="true"
-                className="mt-3 flex min-h-[44px] w-full cursor-not-allowed items-center justify-center rounded-lg bg-gray-200 text-sm font-medium text-gray-500"
-              >
-                在庫切れ
-              </span>
-            )}
-          </li>
-        ))}
+
+              {it.stock > 0 ? (
+                <Link to={`/reserve/${it.id}`} className={`${primaryButtonClass} mt-3`}>
+                  予約する
+                </Link>
+              ) : (
+                // 在庫0はクリックして409を待たせず、その場で予約不可と
+                // 分かるようにする(一括修正m2)。
+                <span
+                  aria-disabled="true"
+                  className="mt-3 flex min-h-[44px] w-full cursor-not-allowed items-center justify-center rounded-lg bg-gray-200 text-sm font-medium text-gray-500"
+                >
+                  在庫切れ
+                </span>
+              )}
+            </li>
+          );
+        })}
       </ul>
     </AppLayout>
   );

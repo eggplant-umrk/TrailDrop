@@ -11,6 +11,7 @@ import {
 import ItemThumbnail from "../components/ItemThumbnail";
 import { toUserMessage } from "../utils/errorMessages";
 import { getCurrentLocation } from "../utils/geolocation";
+import { getShopName } from "../utils/shopNames";
 import {
   formatDistanceFromRoute,
   normalizePickupCandidates,
@@ -18,7 +19,6 @@ import {
 } from "../utils/pickupCandidates";
 import {
   findWindowOffsetForItem,
-  formatPickupHours,
   hasPickupHours,
   isItemAvailableAt,
   jstMinutesSinceMidnight,
@@ -146,6 +146,31 @@ function TimelineRow({ marker, isLast = false, children }) {
       </span>
       <div className="min-w-0 flex-1">{children}</div>
     </li>
+  );
+}
+
+function RouteItemSummary({ item, action }) {
+  const shopName = getShopName(item.shop_id);
+
+  return (
+    <div className="flex items-start gap-3">
+      <ItemThumbnail itemId={item.id} title={item.title} size="xlarge" />
+      <div className="flex min-h-32 min-w-0 flex-1 flex-col">
+        <p className="line-clamp-2 break-words text-sm font-semibold leading-snug">
+          {item.title}
+        </p>
+        <p className="mt-0.5 truncate text-[11px] text-gray-600">
+          提供：{shopName || "提供元情報なし"}
+        </p>
+        <div className="mt-auto pt-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-lg font-bold leading-none">{formatYen(item.price)}</span>
+            <StockLabel stock={item.stock} />
+          </div>
+          {action}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -791,38 +816,19 @@ export default function RouteTest() {
                   <ul className="mt-3 space-y-2">
                     {timeFilteredItems.map((item) => {
                       const bookable = item.stock > 0 && !isPickupWindowExpired;
-                      const cardBody = (
-                        <>
-                          <ItemThumbnail itemId={item.id} title={item.title} />
-                          <div className="min-w-0 flex-1">
-                            <p className="font-semibold">
-                              {item.title}
-                              {item.type === "experience" && (
-                                <span className="ml-2 text-xs font-normal text-gray-500">体験</span>
-                              )}
-                            </p>
-                            <div className="mt-1 flex items-center gap-2">
-                              <span className="text-lg font-bold leading-none">
-                                {formatYen(item.price)}
-                              </span>
-                              <StockLabel stock={item.stock} />
-                              {bookable ? (
-                                <span
-                                  aria-hidden="true"
-                                  className="ml-auto shrink-0 whitespace-nowrap text-sm font-semibold text-[#2f6f3e]"
-                                >
-                                  予約 ›
-                                </span>
-                              ) : (
-                                item.stock > 0 && (
-                                  <span className="ml-auto shrink-0 whitespace-nowrap text-xs text-gray-500">
-                                    受取時間帯が終了
-                                  </span>
-                                )
-                              )}
-                            </div>
-                          </div>
-                        </>
+                      const action = bookable ? (
+                        <span
+                          aria-hidden="true"
+                          className="mt-2 inline-flex min-h-[44px] w-full items-center justify-center rounded-lg bg-[#2f6f3e] px-3 text-sm font-semibold text-white"
+                        >
+                          予約する
+                        </span>
+                      ) : (
+                        item.stock > 0 && (
+                          <span className="mt-2 inline-flex min-h-[44px] w-full items-center justify-center text-center text-[11px] text-gray-500">
+                            受取時間終了
+                          </span>
+                        )
                       );
                       return (
                         <li key={item.id}>
@@ -841,16 +847,16 @@ export default function RouteTest() {
                                 pickupWindowEnd: windowEndDate.toISOString(),
                               }}
                               aria-label={`${item.title}（${formatYen(item.price)}）を予約する`}
-                              className="flex min-h-[88px] items-center gap-3 rounded-lg border border-gray-200 p-3 hover:border-[#2f6f3e] active:bg-[#f7fbf6]"
+                              className="block rounded-lg border border-gray-200 p-3 hover:border-[#2f6f3e] active:bg-[#f7fbf6]"
                             >
-                              {cardBody}
+                              <RouteItemSummary item={item} action={action} />
                             </Link>
                           ) : (
                             <div
                               aria-disabled="true"
-                              className="flex min-h-[88px] items-center gap-3 rounded-lg border border-gray-200 bg-gray-50 p-3 text-gray-500"
+                              className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-gray-500"
                             >
-                              {cardBody}
+                              <RouteItemSummary item={item} action={action} />
                             </div>
                           )}
                         </li>
@@ -873,28 +879,14 @@ export default function RouteTest() {
                           key={item.id}
                           className="rounded-lg border border-dashed border-gray-300 bg-gray-50 p-3"
                         >
-                          <div className="flex items-start gap-3">
-                            <ItemThumbnail itemId={item.id} title={item.title} />
-                            <div className="min-w-0 flex-1">
-                              <p className="font-semibold text-gray-700">{item.title}</p>
-                              <p className="mt-0.5 flex items-center gap-2">
-                                <span className="text-lg font-bold text-gray-700">
-                                  {formatYen(item.price)}
-                                </span>
-                                <StockLabel stock={item.stock} />
-                              </p>
-                              <p className="text-xs text-gray-600">
-                                営業時間{" "}
-                                <span className="whitespace-nowrap">
-                                  {formatPickupHours(item.pickup_available_from)}〜
-                                  {formatPickupHours(item.pickup_available_to)}
-                                </span>
-                              </p>
-                              <span className="mt-1 inline-block rounded bg-gray-200 px-2 py-0.5 text-[11px] text-gray-600">
+                          <RouteItemSummary
+                            item={item}
+                            action={
+                              <span className="mt-2 inline-flex min-h-[44px] w-full items-center justify-center rounded bg-gray-200 px-2 py-1 text-[11px] text-gray-600">
                                 この時間は受取不可
                               </span>
-                            </div>
-                          </div>
+                            }
+                          />
                         </li>
                       ))}
                     </ul>
