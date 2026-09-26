@@ -271,7 +271,7 @@ class TestCreateReservationPickupWindow:
 
     def test_pickup_window_is_saved_and_returned(self, client, fake_supabase):
         start = future_iso(days=1)
-        end = future_iso(days=1)  # window自体の妥当性(start<end)はFrontend側の関心事
+        end = (datetime.now(timezone.utc) + timedelta(days=1, hours=2)).isoformat()
 
         response = create(
             client,
@@ -309,7 +309,9 @@ class TestCreateReservationPickupWindow:
             payment_method="paypay",
             requested_at=future_iso(),
             pickup_window_start=future_iso(days=1),
-            pickup_window_end=future_iso(days=1),
+            pickup_window_end=(
+                datetime.now(timezone.utc) + timedelta(days=1, hours=2)
+            ).isoformat(),
         )
 
         assert response.status_code == 201
