@@ -174,4 +174,46 @@ Pull Request作成時と`main`へのpush時には、GitHub Actionsでフロン�
 
 ## 運用
 
-本番運用では、期限切れ予約を解放して在庫を戻す処理を定期実行する必要があります。実行方法と頻度は、利用するホスティング・データベース環境に合わせて設定してください。
+### 期限切れ予約の自動キャンセル
+
+受取時間帯（`pickup_window_end`）を過ぎても受け取られない `pending` 予約は、そのままだと在庫を確保し続けます。これを解放するため、RPC `expire_stale_pending_reservations()` を用意しています。
+
+- **対象**: `status = 'pending'` かつ `pickup_window_end + 30分 < 現在時刻` の予約（猶予30分。渋滞などで少し遅れた受取に対応するため）。
+- **処理**: 対象予約を `cancelled` にし（決済済みなら `payment_status` も `cancelled`）、在庫を1つ戻します。予約1件ごとに状態変更と在庫返却は同じトランザクションで行われ、顧客キャンセル・QR受取確認と同時に実行されても二重に在庫が戻ることはありません。
+- **1回の上限**: 最大500件。残りがあれば次回の実行で処理されます。
+- **ステータス**: 期限切れも顧客によるキャンセルも同じ `cancelled` です（MVPでは区別しません）。
+
+**定期実行**: マイグレーション `20260928091000_schedule_expire_stale_reservations.sql` が、Supabase同梱の pg_cron に **10分ごと** のジョブ `expire-stale-pending-reservations` を登録します（`supabase db push` で適用。何度実行しても安全です）。BackendやRenderの稼働状態に関係なくDB内で実行されます。pg_cron が無いPostgresでは登録をスキップして警告を出すので、その場合は下のAPIを外部のcron等から定期実行してください。
+
+登録されたジョブの確認（SQL Editor）:
+
+```sql
+select jobname, schedule, active from cron.job where jobname = 'expire-stale-pending-reservations';
+select status, start_time, return_message from cron.job_run_details
+where jobid = (select jobid from cron.job where jobname = 'expire-stale-pending-reservations')
+order by start_time desc limit 5;
+```
+
+手動で実行する場合は、次のどちらかを使います。
+
+APIで実行する例（`X-Staff-Token` 必須。認証に失敗するとレート制限の対象になります）:
+
+```bash
+curl -X POST "https://<backend-host>/staff/reservations/expire-stale" \
+  -H "X-Staff-Token: $STAFF_API_TOKEN"
+# => {"expired_count": 2, "expired_ids": ["...", "..."]}
+```
+
+SQLで実行する例（Supabase SQL Editor）:
+
+```sql
+select id, item_id, pickup_window_end from public.expire_stale_pending_reservations();
+```
+
+**既知の制約**: `pickup_window_end` が無い予約（ルート分析を経由せず商品一覧から直接行った予約、受取時間帯の機能より前に作られた予約）は、この自動期限切れの対象外です。これらの予約は、顧客によるキャンセルまたはスタッフの対応がない限り在庫を確保し続けます。
+
+### 予約作成の二重作成防止とレート制限
+
+- **idempotency key**: Frontendは予約操作ごとにUUIDを生成し、`POST /reservations` の `idempotency_key` として送ります（入力内容が同じ間の再送は同じキー）。通信タイムアウト後の再送などで同じキーが届いた場合、RPC `create_reservation_with_stock` は作成済みの予約をそのまま返し、在庫を二重に減らしません（`reservations.idempotency_key` にunique index）。キーを送らないリクエストは従来どおりです。
+- **レート制限**: `POST /reservations` はIP単位で **1分20回** まで（超過は429）。ルート分析（1分10回）と同じインメモリ方式で、単一プロセス前提です。IPの判定は `TRUSTED_PROXY_IPS` の設定に従います（`backend/.env.example` 参照）。
+- **デプロイ順**: マイグレーション（`20260928090000_reservation_idempotency_key.sql`）を先に適用してから、Backend・Frontendをデプロイしてください。マイグレーションは旧Backendからの呼び出しとも互換です。

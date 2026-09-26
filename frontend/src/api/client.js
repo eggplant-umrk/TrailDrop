@@ -249,6 +249,9 @@ export async function createReservation({
   // では両方nullのまま送る(既存予約との後方互換性)。
   pickup_window_start = null,
   pickup_window_end = null,
+  // 予約操作ごとの一意なキー(Reservation.jsx)。タイムアウト後の再送などで
+  // 同じキーを送ると、作成済みの予約がそのまま返る(二重予約にならない)。
+  idempotency_key = null,
 }) {
   // 本番Backend(main.pyのcreate_reservation)と同じ「未指定・不正はどちらも
   // 400」という扱いを、DEMO_MODEでも先に行う。実際の決済処理はどちらの
@@ -260,6 +263,22 @@ export async function createReservation({
   }
 
   if (DEMO_MODE) {
+    // 本番のRPCと同じく、同じidempotency_keyの予約が既にあればそれを返す
+    // (在庫は減らさない)。別の商品で使われたキーは422。
+    if (idempotency_key) {
+      const existing = Object.values(readDemoReservations()).find(
+        (res) => res.idempotency_key === idempotency_key,
+      );
+      if (existing) {
+        if (String(existing.item_id) !== String(item_id)) {
+          const err = new Error("Idempotency key was used for a different reservation");
+          err.status = 422;
+          throw err;
+        }
+        const { idempotency_key: _key, ...response } = existing;
+        return response;
+      }
+    }
     // 本番のcreate_reservation_with_stock RPCと同じく、商品が無ければ404、
     // 在庫が無ければ409にする。在庫はDEMO予約の分だけ減る。
     const target = demoItemsWithStock().find((item) => String(item.id) === String(item_id));
@@ -302,7 +321,7 @@ export async function createReservation({
 
     try {
       const map = readDemoReservations();
-      map[id] = reservation;
+      map[id] = { ...reservation, idempotency_key };
       writeDemoReservations(map);
     } catch (e) {
       // ignore storage errors in demo mode
@@ -320,6 +339,7 @@ export async function createReservation({
       payment_method,
       pickup_window_start,
       pickup_window_end,
+      ...(idempotency_key ? { idempotency_key } : {}),
     }),
   });
 }

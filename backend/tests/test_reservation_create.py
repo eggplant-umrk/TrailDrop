@@ -71,11 +71,22 @@ class FakeSupabase:
         raise NotImplementedError(f"unexpected RPC: {name}")
 
     def _create_reservation_with_stock(self, params):
+        self.last_params = params
         payment_method = params.get("p_payment_method")
         if payment_method not in ("paypay", "credit_card"):
             raise FakePostgrestError("INVALID_PAYMENT_METHOD", "22023")
 
         item_id = params["p_item_id"]
+        # Same as the SQL function: an existing reservation with this key is
+        # returned as-is (no stock change); a key reused for another item is
+        # rejected.
+        idempotency_key = params.get("p_idempotency_key")
+        if idempotency_key is not None:
+            for existing in self.reservations.values():
+                if existing.get("idempotency_key") == idempotency_key:
+                    if existing["item_id"] != item_id:
+                        raise FakePostgrestError("IDEMPOTENCY_KEY_REUSED", "22023")
+                    return FakeRpcResult([deepcopy(existing)])
         item = self.items.get(item_id)
         if item is None or not item["is_active"]:
             raise FakePostgrestError("ITEM_NOT_FOUND", "P0002")
@@ -105,6 +116,7 @@ class FakeSupabase:
             "payment_status": "paid",
             "pickup_window_start": params.get("p_pickup_window_start"),
             "pickup_window_end": params.get("p_pickup_window_end"),
+            "idempotency_key": idempotency_key,
         }
         self.reservations[reservation_id] = reservation
         return FakeRpcResult([deepcopy(reservation)])
@@ -672,3 +684,122 @@ class TestCreateReservationPickupWindowPastAndDuration:
         )
 
         assert response.status_code == 201
+
+
+class TestCreateReservationIdempotency:
+    """A resend with the same idempotency_key (e.g. after a client-side
+    timeout where the reservation was actually created) must return the
+    same reservation and not take another unit of stock.
+    """
+
+    KEY = "33333333-3333-4333-8333-333333333333"
+
+    def test_resend_with_same_key_returns_the_same_reservation(self, client, fake_supabase):
+        item = fake_supabase.items["11111111-1111-4111-8111-111111111111"]
+
+        first = create(client, idempotency_key=self.KEY)
+        second = create(client, idempotency_key=self.KEY)
+
+        assert first.status_code == 201
+        assert second.status_code == 201
+        assert second.json() == first.json()
+        assert len(fake_supabase.reservations) == 1
+        assert item["stock"] == 4
+
+    def test_response_shape_is_unchanged(self, client, fake_supabase):
+        response = create(client, idempotency_key=self.KEY)
+
+        body = response.json()
+        assert "idempotency_key" not in body
+        assert {"id", "qr_token", "access_token", "status", "payment_status"} <= body.keys()
+
+    def test_different_keys_create_separate_reservations(self, client, fake_supabase):
+        create(client, idempotency_key=self.KEY)
+        create(client, idempotency_key="44444444-4444-4444-8444-444444444444")
+
+        assert len(fake_supabase.reservations) == 2
+
+    def test_key_reused_for_another_item_returns_422(self, client, fake_supabase):
+        other_item = "22222222-2222-4222-8222-222222222222"
+        fake_supabase.items[other_item] = make_item()
+        create(client, idempotency_key=self.KEY)
+
+        response = create(client, item_id=other_item, idempotency_key=self.KEY)
+
+        assert response.status_code == 422
+        assert fake_supabase.items[other_item]["stock"] == 5
+
+    def test_without_key_the_rpc_is_called_with_the_previous_arguments(
+        self, client, fake_supabase
+    ):
+        create(client)
+
+        assert "p_idempotency_key" not in fake_supabase.last_params
+
+    def test_invalid_key_is_rejected_with_422(self, client, fake_supabase):
+        response = create(client, idempotency_key="not-a-uuid")
+
+        assert response.status_code == 422
+        assert fake_supabase.rpc_call_count == 0
+
+
+class TestCreateReservationRateLimit:
+    def test_normal_consecutive_reservations_are_allowed(self, client, fake_supabase):
+        fake_supabase.items["11111111-1111-4111-8111-111111111111"]["stock"] = 100
+
+        responses = [create(client) for _ in range(5)]
+
+        assert all(r.status_code == 201 for r in responses)
+
+    def test_returns_429_after_the_limit_without_touching_stock(self, client, fake_supabase):
+        item = fake_supabase.items["11111111-1111-4111-8111-111111111111"]
+        item["stock"] = 100
+        for _ in range(main.RESERVATION_CREATE_RATE_LIMIT):
+            assert create(client).status_code == 201
+        calls_before = fake_supabase.rpc_call_count
+
+        response = create(client)
+
+        assert response.status_code == 429
+        assert response.json()["detail"] == "Too many reservation requests. Please try again later."
+        assert fake_supabase.rpc_call_count == calls_before
+        assert item["stock"] == 100 - main.RESERVATION_CREATE_RATE_LIMIT
+
+    def test_limit_is_per_client_ip(self):
+        for _ in range(main.RESERVATION_CREATE_RATE_LIMIT):
+            main.enforce_reservation_create_rate_limit("203.0.113.1")
+
+        with pytest.raises(main.HTTPException) as exc_info:
+            main.enforce_reservation_create_rate_limit("203.0.113.1")
+        assert exc_info.value.status_code == 429
+        main.enforce_reservation_create_rate_limit("203.0.113.2")
+
+    def test_window_expiry_allows_requests_again(self, monkeypatch):
+        now = [1000.0]
+        monkeypatch.setattr(main.time, "monotonic", lambda: now[0])
+        for _ in range(main.RESERVATION_CREATE_RATE_LIMIT):
+            main.enforce_reservation_create_rate_limit("203.0.113.1")
+
+        now[0] += main.RESERVATION_CREATE_RATE_WINDOW_SECONDS + 1
+        main.enforce_reservation_create_rate_limit("203.0.113.1")
+
+    def test_spoofed_forwarded_for_is_ignored_without_a_trusted_proxy(
+        self, client, fake_supabase, monkeypatch
+    ):
+        # TestClient connects as "testclient". Without TRUSTED_PROXY_IPS a
+        # spoofed X-Forwarded-For must not give each request a fresh bucket.
+        fake_supabase.items["11111111-1111-4111-8111-111111111111"]["stock"] = 100
+        monkeypatch.delenv("TRUSTED_PROXY_IPS", raising=False)
+        body = {
+            "item_id": "11111111-1111-4111-8111-111111111111",
+            "user_name": "テスト太郎",
+            "payment_method": "paypay",
+        }
+        for i in range(main.RESERVATION_CREATE_RATE_LIMIT):
+            client.post("/reservations", json=body, headers={"X-Forwarded-For": f"198.51.100.{i}"})
+
+        response = client.post(
+            "/reservations", json=body, headers={"X-Forwarded-For": "198.51.100.250"}
+        )
+
+        assert response.status_code == 429
